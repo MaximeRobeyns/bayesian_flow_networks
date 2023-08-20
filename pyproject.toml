@@ -1,0 +1,100 @@
+# Copyright (C) 2023 Maxime Robeyns <dev@maximerobeyns.com>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Package =====================================================================
+
+[build-system]
+requires = ["setuptools >= 61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch_bfn"
+dynamic = ["version"]  # version number is inferred in ./setup.py
+description = "PyTorch implementation of Bayesian Flow Networks from Graves et al., (2023)."
+authors = [
+    { name = "Maxime Robeyns", email = "dev@maximerobeyns.com" },
+]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["Bayesian flow networks", "machine learning", "generative models"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch",
+    "torchtyping>=0.1.4, <1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=0.990,<=1.0",
+    "pytest>=7.2.0",
+    "nbstripout==0.6.1",
+    "matplotlib>=3.6.2",
+    "hydra-core>=1.2.0, <2.0",
+    "ipywidgets>=8.0.4",
+    "jupyterlab>=3.5, <3.6",
+    "jupyterlab-vim",
+    "jupyterlab-vimrc",
+    "tensorboard>=2.11.2, <3.0",
+]
+docs = [
+    "furo>=2022.9.29",
+    "sphinx-autobuild>=2021.3.14",
+    "sphinx-copybutton>=0.5.1",
+    "sphinxext-opengraph>=0.7.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/MaximeRobeyns/Bayesian_flow_networks"
+Repository = "https://github.com/MaximeRobeyns/Bayesian_flow_networks"
+Documentation = "https://maximerobeyns.github.io/Bayesian_flow_networks/"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["torch_bfn", "torch_bfn/*"]
+
+[tool.setuptools.package-data]
+# include any package data as a list of paths here
+torch_bfn = [ ]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+files = "torch_bfn/**/*.py"
+
+[tool.black]
+line-length = 80
+
+[tool.pytest.ini_options]
+# --ff for previously failed first
+# -l for print state on failure
+# -x for stop on first failure
+# -s for show stdout while testing
+# -v for verbose (e.g. show test names)
+# -n for n threadsafe parallel workers
+addopts = "-l -x --ff -s -v"
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \not slow\"')",
+]
