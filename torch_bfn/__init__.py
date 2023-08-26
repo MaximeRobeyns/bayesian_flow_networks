@@ -19,3 +19,4 @@ https://arxiv.org/abs/2308.07037
 __version__ = "0.0.1"
 
 from torch_bfn.diffusion import DDPM
+from torch_bfn.bfn import BFN

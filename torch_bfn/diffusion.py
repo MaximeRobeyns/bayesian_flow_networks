@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from enum import Enum
-from typing import Optional, Dict, OrderedDict
+from typing import Optional
 from torchtyping import TensorType as Tensor
 
 from torch_bfn.utils import str_to_torch_dtype
@@ -33,15 +33,15 @@ class NoiseSchedule(Enum):
 
 
 class ConditionalLinear(nn.Module):
-    def __init__(self, num_in: int, num_out: int, n_steps: int):
+    def __init__(self, num_in: int, num_out: int, num_time_embeddings: int):
         super().__init__()
         self.num_out = num_out
         self.lin = nn.Linear(num_in, num_out)
-        self.embed = nn.Embedding(n_steps, num_out)
+        self.embed = nn.Embedding(num_time_embeddings, num_out)
         self.embed.weight.data.uniform_()
 
     def forward(
-        self, x: Tensor["B", "num_in"], time: Tensor["N"]
+        self, x: Tensor["B", "num_in"], time: Tensor["B", int]
     ) -> Tensor["B", "num_out"]:
         x = x.to(self.lin.weight.data.dtype)
         out = self.lin(x)
@@ -57,7 +57,9 @@ class ConditionalModel(nn.Module):
         self.lin2 = ConditionalLinear(128, 128, n_steps)
         self.lin3 = nn.Linear(128, 2)
 
-    def forward(self, x: Tensor["B", "D"], time: Tensor) -> Tensor["B", "D"]:
+    def forward(
+        self, x: Tensor["B", "D"], time: Tensor["B"]
+    ) -> Tensor["B", "D"]:
         x = F.softplus(self.lin1(x, time))
         x = F.softplus(self.lin2(x, time))
         return self.lin3(x)
@@ -112,8 +114,6 @@ class DDPM(nn.Module):
         elif schedule == schedule.sigmoid:
             betas = t.linspace(-6, 6, n_timesteps)
             betas = t.sigmoid(betas) * (end - start) + start
-        print(n_timesteps)
-        print(betas.shape)
         return betas
 
     @staticmethod
@@ -125,6 +125,7 @@ class DDPM(nn.Module):
         reshape = [time.shape[0]] + [1] * (len(shape) - 1)
         return out.reshape(*reshape)
 
+    @t.inference_mode()
     def q_sample(
         self,
         x_0: Tensor["B", "D"],

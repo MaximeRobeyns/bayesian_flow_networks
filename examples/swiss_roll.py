@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Swiss roll example"""
+"""Swiss roll example using a diffusion model"""
 
 import torch as t
 import matplotlib.pyplot as plt
@@ -26,7 +26,7 @@ from torch_bfn.utils import EMA, norm_denorm, str_to_torch_dtype
 
 
 def make_roll_dset(
-    n: int, bs: int = 128, noise: float = 0.3, dtype: t.dtype = t.float64
+    n: int, bs: int = 512, noise: float = 0.3, dtype: t.dtype = t.float64
 ) -> Tuple[
     DataLoader, DataLoader, Callable[[Tensor["B", "D"]], Tensor["B", "D"]]
 ]:
@@ -47,7 +47,7 @@ def make_roll_dset(
 def plot_fwd_diffusion(data: Tensor["B", "D"], model: DDPM):
     _, axs = plt.subplots(1, 10, figsize=(30, 3))
     for i in range(10):
-        q_i = model.q_sample(data, t.tensor([i * 10]))
+        q_i = model.q_sample(data, t.tensor([i * 10], device=data.device)).cpu()
         axs[i].scatter(q_i[:, 0], q_i[:, 1], s=10)
         axs[i].set_axis_off()
         axs[i].set_title("$q(\\mathbf{x}_{" + str(i * 10) + "})$")
@@ -90,7 +90,7 @@ def train(
             for i in range(1, 11):
                 cur_x = x_seq[i * 10].detach()
                 axs[i - 1].scatter(cur_x[:, 0], cur_x[:, 1], s=10)
-                axs[i - 1].set_title("$q(\mathbf{x}_{" + str(i * 100) + "})$")
+                axs[i - 1].set_title("$q(\\mathbf{x}_{" + str(i * 100) + "})$")
             plt.savefig(f"outputs/train_{epoch}.png")
             plt.close()
 
@@ -100,9 +100,8 @@ if __name__ == "__main__":
     train_loader, val_loader, denorm = make_roll_dset(int(1e4))
 
     model = DDPM()
-    print(model)
 
     # Plot forward model for sanity
-    plot_fwd_diffusion(train_loader.dataset[:][0], model)
+    plot_fwd_diffusion(train_loader.dataset[:][0].to(0), model)
 
     train(model, train_loader, val_loader)

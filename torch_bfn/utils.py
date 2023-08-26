@@ -36,6 +36,11 @@ def copy_mod(mod: nn.Module) -> nn.Module:
     return new_mod
 
 
+def get_fst_device(model: nn.Module) -> t.device:
+    """Returns the device of the first layer in the given module"""
+    return next(model.parameters()).device
+
+
 class EMA(object):
     """
     Maintains an exponential moving average of the registered module's
@@ -170,3 +175,54 @@ def np_to_torch_dtype(np_type: str | np.dtype) -> t.dtype:
             return t.complex128
         case _:
             raise ValueError(f"Unrecognized type, {np_type}")
+
+
+# Some random fun functions which might be useful:
+
+
+class Squareplus(nn.Module):
+    # https://arxiv.org/pdf/2112.11687.pdf
+
+    def __init__(self, a=2):
+        super().__init__()
+        self.a = a
+
+    def forward(self, x: Tensor[...]) -> Tensor[...]:
+        """The 'squareplus' activation function: has very similar properties to
+        softplus, but is far cheaper computationally.
+            - squareplus(0) = 1 (softplus(0) = ln 2)
+            - gradient diminishes more slowly for negative inputs.
+            - ReLU = (x + sqrt(x^2))/2
+            - 'squareplus' becomes smoother with higher 'a'
+        """
+        return (x + t.sqrt(t.square(x) + self.a * self.a)) / 2
+
+
+def squareplus_f(x: Tensor[...], a: int = 2) -> Tensor[...]:
+    """The 'squareplus' activation function: has very similar properties to
+    softplus, but is far cheaper computationally.
+        - squareplus(0) = 1 (softplus(0) = ln 2)
+        - gradient diminishes more slowly for negative inputs.
+        - ReLU = (x + sqrt(x^2))/2
+        - 'squareplus' becomes smoother with higher 'a'
+    """
+    return (x + t.sqrt(t.square(x) + a * a)) / 2
+
+
+def symlog(x: Tensor[...]) -> Tensor[...]:
+    """Useful as a stateless normalisation function.
+        - leaves well-normalised values alone (approximates identity around 0)
+        - compresses both large positive and negative values
+        - symmetric around origin + preserves input sign (unlike logarithm)
+
+    https://arxiv.org/pdf/2301.04104.pdf
+    """
+    return t.sign(x) * t.log(t.abs(x) + 1)
+
+
+def symexp(y: Tensor[...]) -> Tensor[...]:
+    """Inverse of symlog; use to denormalise network predictions when trained
+    on symlog-normalised data.
+        - allows network predictions to quickly move to large values if needed
+    """
+    return t.sign(y) * (t.exp(t.abs(y)) - 1)

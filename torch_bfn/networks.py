@@ -33,6 +33,7 @@ from typing import Optional, Tuple, Union
 from functools import partial
 from packaging import version
 from collections import namedtuple
+from torchtyping import TensorType as Tensor
 
 from torch_bfn.utils import default, cast_tuple, print_once
 
@@ -49,27 +50,6 @@ def downsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
         Rearrange("b c (h p1) (w p2) -> b (c p1 p2) h w", p1=2, p2=2),
         nn.Conv2d(dim * 4, default(out_dim, dim), 1),
     )
-
-
-class Block(nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, groups: int = 8):
-        super().__init__()
-        self.proj = nn.Conv2d(in_dim, out_dim, kernel_size=3, padding=1)
-        self.norm = nn.GroupNorm(groups, out_dim)
-        self.act = nn.SiLU()
-
-    def forward(
-        self, x: t.Tensor, scale_shift: Optional[Tuple[float, float]]
-    ) -> t.Tensor:
-        x = self.proj(x)
-        x = self.norm(x)
-
-        if scale_shift is not None:
-            scale, shift = scale_shift
-            x = x * (scale + 1) + shift
-
-        x = self.act(x)
-        return x
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -99,12 +79,88 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
             t.randn(half_dim), requires_grad=not is_random
         )
 
-    def forward(self, x: t.Tensor) -> t.Tensor:
-        x = x[..., None]
+    def forward(self, x: Tensor["B", 1]) -> Tensor["B", "dim+1"]:
+        # x = x[..., None]
         freqs = x * self.weights[None, :] * 2 * math.pi
         fouriered = t.cat((freqs.sin(), freqs.cos()), -1)
         fouriered = t.cat((x, fouriered), -1)
         return fouriered
+
+
+class LinearBlock(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, dropout_p: float = 0.0):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
+        self.act = nn.SiLU()
+        self.dropout = nn.Dropout(dropout_p)
+
+    def forward(
+        self, x: Tensor["B", "in_dim"], scale_shift=None
+    ) -> Tensor["B", "out_dim"]:
+        x = self.proj(x)
+        x = self.norm(x)
+        if scale_shift is not None:
+            scale, shift = scale_shift
+            x = x * (scale + 1) + shift
+        x = self.act(x)
+        x = self.dropout(x)
+        return x
+
+
+class LinearResnetBlock(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        time_emb_dim: int = 16,
+        dropout_p: float = 0.0,
+    ):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.SiLU(), nn.Linear(time_emb_dim, out_dim * 2)
+        )
+        self.block1 = LinearBlock(in_dim, out_dim, dropout_p)
+        self.block2 = LinearBlock(out_dim, out_dim, dropout_p)
+        self.res_proj = (
+            nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
+        )
+
+    def forward(
+        self, x: Tensor["B", "in_dim"], time_emb: Tensor["B", "time_emb_dim"]
+    ) -> Tensor["B", "out_dim"]:
+        scale_shift = None
+        if self.mlp is not None and time_emb is not None:
+            time_emb = self.mlp(time_emb)
+            scale_shift = time_emb.chunk(2, dim=-1)
+        h = self.block1(x, scale_shift=scale_shift)
+        h = self.block2(h)
+        return h + self.res_proj(x)
+
+
+class Block(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, groups: int = 8):
+        super().__init__()
+        # assert (
+        #     out_dim % groups == 0
+        # ), f"groups ({groups}) does not divide out dim ({out_dim}) in Block"
+        groups = 1 if out_dim % groups != 0 else groups
+        self.proj = nn.Conv2d(in_dim, out_dim, kernel_size=3, padding=1)
+        self.norm = nn.GroupNorm(groups, out_dim)
+        self.act = nn.SiLU()
+
+    def forward(
+        self, x: t.Tensor, scale_shift: Optional[Tuple[float, float]] = None
+    ) -> t.Tensor:
+        x = self.proj(x)
+        x = self.norm(x)
+
+        if scale_shift is not None:
+            scale, shift = scale_shift
+            x = x * (scale + 1) + shift
+
+        x = self.act(x)
+        return x
 
 
 class ResnetBlock(nn.Module):
@@ -118,7 +174,7 @@ class ResnetBlock(nn.Module):
     ):
         super().__init__()
         self.mlp = (
-            nn.Sequential(nn.SiLU(), nn.Linear(time_emb_dim, dim_out * 2))
+            nn.Sequential(nn.SiLU(), nn.Linear(time_emb_dim, out_dim * 2))
             if time_emb_dim is not None
             else None
         )
@@ -400,18 +456,22 @@ class Unet(nn.Module):
             attn_class = FullAttention if full_attn_i else LinearAttention
             self.ups.append(
                 nn.ModuleList(
-                    block_class(
-                        out_dim + in_dim, out_dim, time_emb_dim=time_dim
-                    ),
-                    block_class(
-                        out_dim + in_dim, out_dim, time_emb_dim=time_dim
-                    ),
-                    attn_class(
-                        out_dim, dim_head=attn_dim_head_i, heads=attn_heads_i
-                    ),
-                    upsample(out_dim, in_dim)
-                    if not is_last
-                    else nn.Conv2d(out_dim, in_dim, 3, padding=1),
+                    [
+                        block_class(
+                            out_dim + in_dim, out_dim, time_emb_dim=time_dim
+                        ),
+                        block_class(
+                            out_dim + in_dim, out_dim, time_emb_dim=time_dim
+                        ),
+                        attn_class(
+                            out_dim,
+                            dim_head=attn_dim_head_i,
+                            heads=attn_heads_i,
+                        ),
+                        upsample(out_dim, in_dim)
+                        if not is_last
+                        else nn.Conv2d(out_dim, in_dim, 3, padding=1),
+                    ]
                 )
             )
 
