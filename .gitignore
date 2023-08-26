@@ -1,0 +1,7 @@
+.envrc
+reference
+**/*.egg-info
+**/__pycache__
+planning.org
+outputs
+notebooks
