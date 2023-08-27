@@ -35,7 +35,7 @@ from packaging import version
 from collections import namedtuple
 from torchtyping import TensorType as Tensor
 
-from torch_bfn.utils import default, cast_tuple, print_once
+from torch_bfn.utils import Squareplus, default, cast_tuple, print_once
 
 
 def upsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
@@ -118,7 +118,8 @@ class LinearResnetBlock(nn.Module):
     ):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.SiLU(), nn.Linear(time_emb_dim, out_dim * 2)
+            nn.SiLU(),
+            nn.Linear(time_emb_dim, out_dim * 2),
         )
         self.block1 = LinearBlock(in_dim, out_dim, dropout_p)
         self.block2 = LinearBlock(out_dim, out_dim, dropout_p)

@@ -22,7 +22,7 @@ from torch_bfn.networks import (
     RandomOrLearnedSinusoidalPosEmb,
     LinearResnetBlock,
 )
-from torch_bfn.utils import str_to_torch_dtype
+from torch_bfn.utils import str_to_torch_dtype, Squareplus
 
 
 class BFNNetwork(nn.Module):
@@ -38,16 +38,16 @@ class BFNNetwork(nn.Module):
         dropout_p: float,
     ):
         super().__init__()
-        # self.time_mlp = nn.Sequential(
-        #     RandomOrLearnedSinusoidalPosEmb(sin_dim, random_time_emb),
-        #     nn.Linear(sin_dim + 1, time_dim),
-        #     nn.GELU(),
-        #     nn.Linear(time_dim, time_dim),
-        # )
-        self.time_mlp = RandomOrLearnedSinusoidalPosEmb(
-            sin_dim, random_time_emb
+        self.time_mlp = nn.Sequential(
+            RandomOrLearnedSinusoidalPosEmb(sin_dim, random_time_emb),
+            nn.Linear(sin_dim + 1, time_dim),
+            nn.GELU(),
+            nn.Linear(time_dim, time_dim),
         )
-        time_dim = sin_dim + 1
+        # self.time_mlp = RandomOrLearnedSinusoidalPosEmb(
+        #     sin_dim, random_time_emb
+        # )
+        # time_dim = sin_dim + 1
 
         hs = [dim] + hidden_dims
         self.blocks = nn.ModuleList([])
@@ -59,10 +59,11 @@ class BFNNetwork(nn.Module):
         self, x: Tensor["B", "D"], time: Tensor["B"]
     ) -> Tensor["B", "D"]:
         time = self.time_mlp(time)
+        x_res = x.clone()
         for block in self.blocks:
             x = block(x, time)
         x = self.final_proj(x)
-        return x
+        return x + x_res
 
 
 class BFN(nn.Module):
@@ -76,14 +77,23 @@ class BFN(nn.Module):
         dropout_p: float = 0.0,
         device_str: str = "cuda:0",
         dtype_str: str = "float64",
+        eps: float = 1e-9,
     ):
         super().__init__()
         self.device = t.device(device_str)
         self.dtype = str_to_torch_dtype(dtype_str)
         self.dim = dim
 
+        dtype_eps = t.finfo(self.dtype).eps
+        self.eps = eps if eps < dtype_eps else dtype_eps
+
         self.net = BFNNetwork(
-            dim, hidden_dims, sin_dim, time_dim, random_time_emb, dropout_p
+            dim,
+            hidden_dims,
+            sin_dim,
+            time_dim,
+            random_time_emb,
+            dropout_p,
         ).to(self.device, self.dtype)
         self.net.train()
 
@@ -107,12 +117,10 @@ class BFN(nn.Module):
         """
         Continuous-time loss function for continuous data.
         """
-        s1 = t.tensor([sigma_1], device=x.device)
-        time = t.rand((*x.shape[:-1], 1), device=x.device)
+        s1 = t.tensor([sigma_1], device=x.device, dtype=self.dtype)
+        time = t.rand((*x.shape[:-1], 1), device=x.device, dtype=self.dtype)
         gamma = 1.0 - s1.pow(2.0 * time)
-        # mu = gamma * x + gamma * (1 - gamma) * t.randn_like(x)
-        # mu = gamma * x + t.sqrt(gamma * (1 - gamma)) * t.randn_like(x)
-        dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma))
+        dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma) + self.eps)
         mu = dist.sample((1,)).squeeze(0)
         x_pred = self.cts_output_prediction(mu, time, gamma)
         loss = -(s1.log() * (x - x_pred).pow(2.0) / s1.pow(2 * time)).mean(-1)
@@ -125,7 +133,8 @@ class BFN(nn.Module):
         i = t.randint(1, n + 1, (*x.shape[:-1], 1)).to(x.device)
         time = (i - 1) / n
         gamma = 1.0 - s1.pow(2.0 * time)
-        mu = gamma * x + gamma * (1 - gamma) * t.randn_like(x)
+        dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma) + self.eps)
+        mu = dist.sample((1,)).squeeze(0)
         x_pred = self.cts_output_prediction(mu, time, gamma)
         loss = (n * (1.0 - s1.pow(2.0 / n))) / (2.0 * s1.pow(2.0 * i / n))
         loss *= (x - x_pred).pow(2.0)
@@ -149,7 +158,7 @@ class BFN(nn.Module):
             gamma = 1 - s1.pow(2 * time)
             x = self.cts_output_prediction(mu, time, gamma)
             alpha = s1.pow(-2 * i / n_timesteps) * (1 - s1.pow(2 / n_timesteps))
-            y_dist = t.distributions.Normal(x, 1 / alpha)
+            y_dist = t.distributions.Normal(x, 1 / alpha + self.eps)
             y = y_dist.sample((1,)).squeeze(0)
             mu = (rho * mu + alpha * y) / (rho + alpha)
             rho = rho + alpha
