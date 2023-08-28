@@ -2,6 +2,8 @@
 
 A PyTorch implementation of Bayesian Flow Networks (Graves et al., 2023).
 
+See associated blog post [here](https://maximerobeyns.com/bayesian_flow_networks).
+
 ## Installation
 
 ```bash
@@ -18,7 +20,7 @@ For continuous data, with continuous-time loss
 # Setup the BFN
 import torch
 from torch_bfn import BFN
-from torch_bfn.utils import EMA, get_fst_device, norm_denorm, str_to_torch_dtype
+from torch_bfn.utils import EMA
 
 model = BFN(dim=2, hidden_dims=[128, 128])
 
