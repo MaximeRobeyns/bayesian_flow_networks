@@ -35,7 +35,7 @@ from packaging import version
 from collections import namedtuple
 from torchtyping import TensorType as Tensor
 
-from torch_bfn.utils import Squareplus, default, cast_tuple, print_once
+from torch_bfn.utils import default, cast_tuple, print_once
 
 
 def upsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
@@ -137,6 +137,51 @@ class LinearResnetBlock(nn.Module):
         h = self.block1(x, scale_shift=scale_shift)
         h = self.block2(h)
         return h + self.res_proj(x)
+
+
+class LinearNetwork(nn.Module):
+    def __init__(
+        self,
+        dim: int = 2,
+        hidden_dims: list[int] = [128, 128],
+        sin_dim: int = 16,
+        time_dim: int = 16,
+        random_time_emb: bool = False,
+        dropout_p: float = 0.0,
+    ):
+        """Simple network for D-dimensional data.
+
+        Args:
+            dim: data dimension
+            hidden_dims: Hidden features to use in the network
+            sin_dim: simusoidal time embedding dims
+            time_dim: time embedding dimension
+            random_time_emb: use random (True) or learned (False) time embedding
+            dropout_p: dropout used in network
+        """
+        super().__init__()
+        self.time_mlp = nn.Sequential(
+            RandomOrLearnedSinusoidalPosEmb(sin_dim, random_time_emb),
+            nn.Linear(sin_dim + 1, time_dim),
+            nn.GELU(),
+            nn.Linear(time_dim, time_dim),
+        )
+
+        hs = [dim] + hidden_dims
+        self.blocks = nn.ModuleList([])
+        for j, k in zip(hs[:-1], hs[1:]):
+            self.blocks.append(LinearResnetBlock(j, k, time_dim, dropout_p))
+        self.final_proj = nn.Linear(hs[-1], dim)
+
+    def forward(
+        self, x: Tensor["B", "D"], time: Tensor["B"]
+    ) -> Tensor["B", "D"]:
+        time = self.time_mlp(time)
+        x_res = x.clone()
+        for block in self.blocks:
+            x = block(x, time)
+        x = self.final_proj(x)
+        return x + x_res
 
 
 class Block(nn.Module):

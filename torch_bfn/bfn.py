@@ -18,67 +18,28 @@ import torch.nn as nn
 
 from torchtyping import TensorType as Tensor
 
-from torch_bfn.networks import (
-    RandomOrLearnedSinusoidalPosEmb,
-    LinearResnetBlock,
-)
-from torch_bfn.utils import str_to_torch_dtype, Squareplus
+from torch_bfn.utils import str_to_torch_dtype
 
 
-class BFNNetwork(nn.Module):
-    """A very simple network to use for BFN testing"""
-
+class ContinuousBFN(nn.Module):
     def __init__(
         self,
         dim: int,
-        hidden_dims: list[int],
-        sin_dim: int,
-        time_dim: int,
-        random_time_emb: bool,
-        dropout_p: float,
-    ):
-        super().__init__()
-        self.time_mlp = nn.Sequential(
-            RandomOrLearnedSinusoidalPosEmb(sin_dim, random_time_emb),
-            nn.Linear(sin_dim + 1, time_dim),
-            nn.GELU(),
-            nn.Linear(time_dim, time_dim),
-        )
-        # self.time_mlp = RandomOrLearnedSinusoidalPosEmb(
-        #     sin_dim, random_time_emb
-        # )
-        # time_dim = sin_dim + 1
-
-        hs = [dim] + hidden_dims
-        self.blocks = nn.ModuleList([])
-        for j, k in zip(hs[:-1], hs[1:]):
-            self.blocks.append(LinearResnetBlock(j, k, time_dim, dropout_p))
-        self.final_proj = nn.Linear(hs[-1], dim)
-
-    def forward(
-        self, x: Tensor["B", "D"], time: Tensor["B"]
-    ) -> Tensor["B", "D"]:
-        time = self.time_mlp(time)
-        x_res = x.clone()
-        for block in self.blocks:
-            x = block(x, time)
-        x = self.final_proj(x)
-        return x + x_res
-
-
-class BFN(nn.Module):
-    def __init__(
-        self,
-        dim: int = 2,
-        hidden_dims: list[int] = [128, 128],
-        sin_dim: int = 16,
-        time_dim: int = 16,
-        random_time_emb: bool = False,
-        dropout_p: float = 0.0,
-        device_str: str = "cuda:0",
-        dtype_str: str = "float64",
+        net: nn.Module,
+        *,
+        device_str: str = "cpu",
+        dtype_str: str = "float32",
         eps: float = 1e-9,
     ):
+        """Continuous-time Bayesian Flow Network
+
+        Args:
+            dim: The number of data dimensions
+            net: The network to use; mapping [B, D] x [B] -> [B, D]
+            device_str: PyTorch device to use
+            dtype_str: PyTorch dtype to use
+            eps: stability parameter
+        """
         super().__init__()
         self.device = t.device(device_str)
         self.dtype = str_to_torch_dtype(dtype_str)
@@ -87,15 +48,14 @@ class BFN(nn.Module):
         dtype_eps = t.finfo(self.dtype).eps
         self.eps = eps if eps < dtype_eps else dtype_eps
 
-        self.net = BFNNetwork(
-            dim,
-            hidden_dims,
-            sin_dim,
-            time_dim,
-            random_time_emb,
-            dropout_p,
-        ).to(self.device, self.dtype)
+        self.net = net.to(self.device, self.dtype)
         self.net.train()
+
+        # Assert that the network has the right dimensions
+        test_batch = t.randn((16, dim), device=self.device, dtype=self.dtype)
+        test_time = t.rand((16, 1), device=self.device, dtype=self.dtype)
+        out = self.net(test_batch, test_time)
+        assert out.shape == (16, dim)
 
     def cts_output_prediction(
         self,
@@ -108,14 +68,21 @@ class BFN(nn.Module):
     ) -> Tensor["B", "D"]:
         assert (time >= 0).all() and (time <= 1).all()
         assert mu.dim() == time.dim()
+        zeros = t.zeros_like(mu)
         eps = self.net(mu, time)
         x = (mu / gamma) - t.sqrt((1.0 - gamma) / gamma) * eps
         x = t.clip(x, x_min, x_max)
-        return t.where(time < t_min, 1e-5 * eps, x)
+        return t.where(time < t_min, zeros, x)
 
     def loss(self, x: Tensor["B", "D"], sigma_1: float = 0.002) -> Tensor["B"]:
-        """
-        Continuous-time loss function for continuous data.
+        """Continuous-time loss function; L∞(t)
+
+        Args:
+            x: training data
+            sigma_1: standard deviation at t=1.
+
+        Returns:
+            Tensor["B"]: batch loss
         """
         s1 = t.tensor([sigma_1], device=x.device, dtype=self.dtype)
         time = t.rand((*x.shape[:-1], 1), device=x.device, dtype=self.dtype)
@@ -129,15 +96,31 @@ class BFN(nn.Module):
     def discrete_loss(
         self, x: Tensor["B", "D"], sigma_1: float = 0.002, n: int = 30
     ) -> Tensor["B"]:
+        """Discrete (n-step) loss function for continuous data.
+
+        Args:
+            x: training data
+            sigma_1: standard deviatoin at t=1
+            n: number of training steps
+
+        Returns:
+            Tensor["B"]: batch loss
+        """
         s1 = t.tensor([sigma_1], device=x.device)
         i = t.randint(1, n + 1, (*x.shape[:-1], 1)).to(x.device)
         time = (i - 1) / n
         gamma = 1.0 - s1.pow(2.0 * time)
-        dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma) + self.eps)
-        mu = dist.sample((1,)).squeeze(0)
-        x_pred = self.cts_output_prediction(mu, time, gamma)
+        mask = (gamma != 0).squeeze(-1)
+        mu = t.zeros_like(x)
+        gnz = gamma[mask]
+        dist = t.distributions.Normal(gnz * x[mask], gnz * (1 - gnz))
+        mu[mask] = dist.sample((1,)).squeeze(0)
+        x_pred = t.zeros_like(mu)
+        x_pred[mask] = self.cts_output_prediction(
+            mu[mask], time[mask], gamma[mask]
+        )
         loss = (n * (1.0 - s1.pow(2.0 / n))) / (2.0 * s1.pow(2.0 * i / n))
-        loss *= (x - x_pred).pow(2.0)
+        loss = loss * (x - x_pred).pow(2.0)
         return loss
 
     @t.inference_mode()

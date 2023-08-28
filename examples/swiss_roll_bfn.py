@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Swiss roll example using a diffusion model"""
+"""Swiss roll example using a simple continuous BFN"""
 
+import os
 import torch as t
 import matplotlib.pyplot as plt
 
@@ -21,7 +22,7 @@ from torchtyping import TensorType as Tensor
 from sklearn.datasets import make_swiss_roll
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from torch_bfn import BFN
+from torch_bfn import ContinuousBFN, LinearNetwork
 from torch_bfn.utils import EMA, get_fst_device, norm_denorm, str_to_torch_dtype
 
 
@@ -50,64 +51,21 @@ def plot_samples(
     samples = denormed_samples.numpy()
     plt.figure(figsize=(6, 4))
     plt.scatter(samples[:, 0], samples[:, 1], edgecolor="k")
-    plt.title("Posterior Samples")
+    plt.title("BFN Samples")
     plt.xlabel("Feature 1")
     plt.ylabel("Feature 2")
+    # plt.show()
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
     plt.savefig(fpath)
     plt.close()
 
 
-@t.inference_mode()
-def plot_trajectories(
-    model: BFN,
-    n_samples: int = 10,
-    sigma_1: float = 0.002,
-    n: int = 100,
-    eps=1e-8,
-):
-    model.eval()
-    device = get_fst_device(model)
-    xs = t.linspace(-3.0, 3.0, 200).to(device)
-    s1 = t.tensor([sigma_1]).to(device)
-    mus, probs = [], []
-    mu = t.zeros((n_samples, 1)).to(device)
-    mus.append(mu[None, :].cpu().clone().detach())
-    probs.append(
-        t.distributions.Normal(0, 1)
-        .log_prob(xs)[None, :]
-        .cpu()
-        .clone()
-        .detach()
-    )
-    rho = 1.0
-    for i in range(1, n + 1):
-        time = t.tensor([[(i - 1) / n]]).to(device).expand(n_samples, 1)
-        gamma = 1 - s1.pow(2 * time)
-        x = model.cts_output_prediction(mu, time, gamma)
-        alpha = s1.pow(-2 * i / n) * (1 - s1.pow(2 / n))
-        y = x + t.randn_like(x) / alpha
-        mu = (rho * mu + alpha * y) / (rho + alpha)
-        mus.append(mu[None, :].cpu())
-        # mus.append((y)[None, :].cpu())
-        bfdist = t.distributions.Normal(
-            gamma * x[:1], gamma * (1 - gamma) + eps
-        )
-        probs.append(bfdist.log_prob(xs).mean(0, keepdim=True).detach().cpu())
-        rho = rho + alpha
-    samples = (
-        model.cts_output_prediction(
-            mu, t.tensor([[1.0]]).to(0).expand(n_samples, 1), 1 - s1.pow(2)
-        ).cpu(),
-    )
-    return samples, mus, probs
-
-
 def train(
-    model: BFN,
+    model: ContinuousBFN,
     train_loader: DataLoader,
     val_loader: DataLoader,
     denorm: Callable[[Tensor["B", "D"]], Tensor["B", "D"]],
-    epochs: int = 2001,
+    epochs: int = 100,
     device_str: str = "cuda:0",
     dtype_str: str = "float64",
 ):
@@ -124,34 +82,50 @@ def train(
         for batch in train_loader:
             X = batch[0].to(device, dtype)
             loss = model.loss(X, sigma_1=0.01).mean()
+            # loss = model.discrete_loss(X, sigma_1=0.01, n=30).mean()
             opt.zero_grad()
             loss.backward()
             t.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             ema.update(model)
 
-        if epoch % 200 == 0:
+        if epoch % 20 == 0:
             assert loss is not None
             print(loss.item())
-            samples = model.sample(1000, sigma_1=0.001, n_timesteps=10)
+            samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
             plot_samples(denorm(samples.cpu()), f"outputs/samples_{epoch}.png")
 
 
 if __name__ == "__main__":
 
     train_loader, val_loader, denorm = make_roll_dset(int(1e4))
+    device = "cuda:0"
+    dtype = "float32"
 
-    model = BFN(
+    net = LinearNetwork(
         dim=2,
-        hidden_dims=[128, 128],
+        hidden_dims=[512, 512],
         sin_dim=16,
         time_dim=64,
         random_time_emb=False,
         dropout_p=0.0,
-        device_str="cuda:0",
-        dtype_str="float64",
     )
+
+    model = ContinuousBFN(
+        dim=2,
+        net=net,
+        device_str=device,
+        dtype_str=dtype,
+    )
+
     samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
     plot_samples(denorm(samples.cpu()))
 
-    train(model, train_loader, val_loader, denorm)
+    train(
+        model,
+        train_loader,
+        val_loader,
+        denorm,
+        device_str=device,
+        dtype_str=dtype,
+    )
