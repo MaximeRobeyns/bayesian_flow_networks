@@ -14,10 +14,15 @@ pip install -e .
 
 ## Examples
 
-### Continuous data
+### Continuous Data (swiss roll)
 
-Both the infinite and discrete time loss functions are implemented. Here is an
-example for 2D continuous data.
+Both the infinite and discrete time loss functions are implemented.
+
+Here is a minimal example for the 2D swiss roll dataset (see
+`examples/swiss_roll_bfn.py` for the full code). Here are some model samples
+throughout training:
+
+![Swiss roll samples throughout training](./examples/swiss_roll.png)
 
 ```python
 # Imports
@@ -36,6 +41,9 @@ opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
 ema = EMA(0.9)
 ema.register(model)
 
+# Load data (see examples/swiss_roll_bfn)
+train_loader = ...
+
 for epoch in range(100):
     for batch in train_loader:
         X = batch[0].to(device, dtype)
@@ -52,7 +60,5 @@ for epoch in range(100):
 # Sample from the model
 samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
 ```
-
-![Swiss roll samples throughout training](./examples/swiss_roll.png)
 
 > Note: work in progress. More examples to come.

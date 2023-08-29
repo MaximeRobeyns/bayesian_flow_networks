@@ -16,6 +16,7 @@
 import torch as t
 import torch.nn as nn
 
+from typing import Tuple
 from torchtyping import TensorType as Tensor
 
 from torch_bfn.utils import str_to_torch_dtype
@@ -24,7 +25,7 @@ from torch_bfn.utils import str_to_torch_dtype
 class ContinuousBFN(nn.Module):
     def __init__(
         self,
-        dim: int,
+        dim: Tuple[int],
         net: nn.Module,
         *,
         device_str: str = "cpu",
@@ -34,7 +35,8 @@ class ContinuousBFN(nn.Module):
         """Continuous-time Bayesian Flow Network
 
         Args:
-            dim: The number of data dimensions
+            dim: The dimensions of the data e.g. (8,) for 8-dimensional
+                vectors, or (3, 64, 64) for RGB images with 64x64 pixels.
             net: The network to use; mapping [B, D] x [B] -> [B, D]
             device_str: PyTorch device to use
             dtype_str: PyTorch dtype to use
@@ -52,10 +54,15 @@ class ContinuousBFN(nn.Module):
         self.net.train()
 
         # Assert that the network has the right dimensions
-        test_batch = t.randn((16, dim), device=self.device, dtype=self.dtype)
-        test_time = t.rand((16, 1), device=self.device, dtype=self.dtype)
+        test_batch = t.randn(
+            (16, *self.dim), device=self.device, dtype=self.dtype
+        )
+        test_time = t.rand((16,), device=self.device, dtype=self.dtype)
         out = self.net(test_batch, test_time)
-        assert out.shape == (16, dim)
+        assert out.shape == (16, *self.dim)
+
+    def _pad_to_dim(self, a: Tensor["B"]):
+        return a.view(a.shape[0], *((1,) * len(self.dim)))
 
     def cts_output_prediction(
         self,
@@ -69,7 +76,7 @@ class ContinuousBFN(nn.Module):
         assert (time >= 0).all() and (time <= 1).all()
         assert mu.dim() == time.dim()
         zeros = t.zeros_like(mu)
-        eps = self.net(mu, time)
+        eps = self.net(mu, time.view(-1))
         x = (mu / gamma) - t.sqrt((1.0 - gamma) / gamma) * eps
         x = t.clip(x, x_min, x_max)
         return t.where(time < t_min, zeros, x)
@@ -85,7 +92,8 @@ class ContinuousBFN(nn.Module):
             Tensor["B"]: batch loss
         """
         s1 = t.tensor([sigma_1], device=x.device, dtype=self.dtype)
-        time = t.rand((*x.shape[:-1], 1), device=x.device, dtype=self.dtype)
+        time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
+        time = self._pad_to_dim(time)
         gamma = 1.0 - s1.pow(2.0 * time)
         dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma) + self.eps)
         mu = dist.sample((1,)).squeeze(0)
@@ -107,18 +115,20 @@ class ContinuousBFN(nn.Module):
             Tensor["B"]: batch loss
         """
         s1 = t.tensor([sigma_1], device=x.device)
-        i = t.randint(1, n + 1, (*x.shape[:-1], 1)).to(x.device)
+        i = t.randint(1, n + 1, (x.size(0),)).to(x.device)
+        i = self._pad_to_dim(i)
         time = (i - 1) / n
         gamma = 1.0 - s1.pow(2.0 * time)
-        mask = (gamma != 0).squeeze(-1)
+        mask = gamma.view(-1) != 0
         mu = t.zeros_like(x)
-        gnz = gamma[mask]
+        gnz = gamma[mask]  # gamma non-zero
         dist = t.distributions.Normal(gnz * x[mask], gnz * (1 - gnz))
         mu[mask] = dist.sample((1,)).squeeze(0)
         x_pred = t.zeros_like(mu)
-        x_pred[mask] = self.cts_output_prediction(
+        cts_output = self.cts_output_prediction(
             mu[mask], time[mask], gamma[mask]
         )
+        x_pred[mask] = cts_output
         loss = (n * (1.0 - s1.pow(2.0 / n))) / (2.0 * s1.pow(2.0 * i / n))
         loss = loss * (x - x_pred).pow(2.0)
         return loss
@@ -128,16 +138,13 @@ class ContinuousBFN(nn.Module):
         self, n_samples: int = 10, sigma_1: float = 0.001, n_timesteps: int = 20
     ) -> Tensor["n_samples", "dim"]:
         self.net.eval()
-        s1 = t.tensor((sigma_1,), device=self.device, dtype=self.dtype)
-        mu = t.zeros(
-            (n_samples, self.dim), device=self.device, dtype=self.dtype
-        )
+        tkwargs = {"device": self.device, "dtype": self.dtype}
+        s1 = t.tensor((sigma_1,), **tkwargs)
+        mu = t.zeros((n_samples, *self.dim), **tkwargs)
         rho = 1.0
         for i in range(1, n_timesteps + 1):
-            time = t.tensor(
-                ((i - 1) / n_timesteps,), device=self.device, dtype=self.dtype
-            )
-            time = time.expand(n_samples, 1)
+            time = t.tensor(((i - 1) / n_timesteps,), **tkwargs)
+            time = self._pad_to_dim(time)
             gamma = 1 - s1.pow(2 * time)
             x = self.cts_output_prediction(mu, time, gamma)
             alpha = s1.pow(-2 * i / n_timesteps) * (1 - s1.pow(2 / n_timesteps))
@@ -145,8 +152,5 @@ class ContinuousBFN(nn.Module):
             y = y_dist.sample((1,)).squeeze(0)
             mu = (rho * mu + alpha * y) / (rho + alpha)
             rho = rho + alpha
-        return self.cts_output_prediction(
-            mu,
-            t.tensor((1,), device=self.device).expand(n_samples, 1),
-            1 - s1.pow(2.0),
-        )
+        t1 = self._pad_to_dim(t.tensor((1,), **tkwargs))
+        return self.cts_output_prediction(mu, t1, 1 - s1.pow(2.0))

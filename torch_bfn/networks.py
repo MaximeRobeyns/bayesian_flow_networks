@@ -38,20 +38,6 @@ from torchtyping import TensorType as Tensor
 from torch_bfn.utils import default, cast_tuple, print_once
 
 
-def upsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
-    return nn.Sequential(
-        nn.Upsample(scale_factor=2, mode="nearest"),
-        nn.Conv2d(dim, default(out_dim, dim), 3, padding=1),
-    )
-
-
-def downsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
-    return nn.Sequential(
-        Rearrange("b c (h p1) (w p2) -> b (c p1 p2) h w", p1=2, p2=2),
-        nn.Conv2d(dim * 4, default(out_dim, dim), 1),
-    )
-
-
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -176,12 +162,27 @@ class LinearNetwork(nn.Module):
     def forward(
         self, x: Tensor["B", "D"], time: Tensor["B"]
     ) -> Tensor["B", "D"]:
-        time = self.time_mlp(time)
+        time = self.time_mlp(time[:, None])
+        # time = self.time_mlp(time)
         x_res = x.clone()
         for block in self.blocks:
             x = block(x, time)
         x = self.final_proj(x)
         return x + x_res
+
+
+def upsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
+    return nn.Sequential(
+        nn.Upsample(scale_factor=2, mode="nearest"),
+        nn.Conv2d(dim, default(out_dim, dim), 3, padding=1),
+    )
+
+
+def downsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
+    return nn.Sequential(
+        Rearrange("b c (h p1) (w p2) -> b (c p1 p2) h w", p1=2, p2=2),
+        nn.Conv2d(dim * 4, default(out_dim, dim), 1),
+    )
 
 
 class Block(nn.Module):
@@ -395,9 +396,9 @@ class Unet(nn.Module):
         self,
         dim: int,
         dim_mults: list[int] = [1, 2, 2],
+        channels: int = 3,
         init_dim: Optional[int] = None,
         out_dim: Optional[int] = None,
-        channels: int = 3,
         resnet_block_groups: int = 8,
         learned_sinusoidal_cond: bool = False,
         learned_sinusoidal_dim: int = 16,
@@ -411,10 +412,11 @@ class Unet(nn.Module):
 
         # Set up dimensions
         self.channels = channels
-        init_dim = default(init_dim, dim)
-        self.init_conv = nn.Conv2d(channels, init_dim, 7, padding=3)
+        self.init_dim = default(init_dim, dim)
+        self.out_dim = default(out_dim, channels)
+        self.init_conv = nn.Conv2d(channels, self.init_dim, 7, padding=3)
 
-        dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
+        dims = [self.init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
 
         block_class = partial(ResnetBlock, groups=resnet_block_groups)
@@ -521,7 +523,6 @@ class Unet(nn.Module):
                 )
             )
 
-        self.out_dim = default(out_dim, channels)
         self.final_res_block = block_class(dim * 2, dim, time_emb_dim=time_dim)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
