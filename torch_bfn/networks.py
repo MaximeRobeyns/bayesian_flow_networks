@@ -1,4 +1,4 @@
-# Copyright (C) 2023 Maxime  <dev@maximerobeyns.com>
+# Copyright (C) 2023 Maxime Robeyns <dev@maximerobeyns.com>
 # Copyright (C) 2020 Phil Wang <github.com/lucidrains>
 # Copyright (C) 2020 Jonathan Ho <github.com/hojonathanho>
 #
@@ -13,7 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Some neural networks and associated modules.
+"""Some neural networks and associated modules for use with Bayesian Flow
+Networks.
 
 References:
 https://github.com/hojonathanho/diffusion
@@ -26,6 +27,7 @@ import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
 
+from abc import abstractmethod
 from torch import einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange
@@ -36,6 +38,64 @@ from collections import namedtuple
 from torchtyping import TensorType as Tensor
 
 from torch_bfn.utils import default, exists, cast_tuple, print_once
+
+
+class BFNetwork(nn.Module):
+    """
+    Abstraact base class for neural networks (nn.Module) for use with
+    torch_bfn.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        x: Tensor["B", "D"],
+        time: Tensor["B"],
+        cond: Optional[Tensor["B"]] = None,
+        cond_drop_prob: Optional[float] = None,
+    ) -> Tensor["B", "D"]:
+        """Returns a value of the same shape as x (e.g. predicts the noise
+        applied to x) at time t with optional conditioning information.
+
+        Args:
+            x: the current parameter vector
+            time: current timestep
+            cond: conditioning information
+            cond_drop_prob: probability of dropping conditioning info out for
+                classifier-free guidance.
+
+        Returns:
+            Tensor["B", "D"]: updated parameter vector
+        """
+        raise NotImplementedError
+
+    def forward_with_cond_scale(
+        self, *args, cond_scale=1.0, rescaled_phi=0.0, **kwargs
+    ) -> Tensor["B", "D"]:
+        """For conditional sampling, this additionally scales the conditional
+        guidance, and sharpens phi.
+
+        This abstract class just invokes the forward method as a fallback.
+        """
+        logits = self.forward(*args, cond_drop_prob=0.0, **kwargs)
+        if cond_scale == 1.0:
+            return logits
+
+        null_logits = self.forward(*args, cond_drop_prob=1.0, **kwargs)
+        scaled_logits = null_logits + (logits - null_logits) * cond_scale
+
+        if rescaled_phi == 0.0:
+            return scaled_logits
+
+        std_fn = partial(
+            t.std, dim=tuple(range(1, scaled_logits.ndim)), keepdim=True
+        )
+        rescaled_logits = scaled_logits * (
+            std_fn(logits) / std_fn(scaled_logits)
+        )
+        return rescaled_logits * rescaled_phi + scaled_logits * (
+            1.0 - rescaled_phi
+        )
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -99,12 +159,14 @@ class LinearResnetBlock(nn.Module):
         in_dim: int,
         out_dim: int,
         time_emb_dim: int = 16,
+        cond_emb_dim: Optional[int] = None,
         dropout_p: float = 0.0,
     ):
         super().__init__()
+        mlp_dim = default(time_emb_dim, 0) + default(cond_emb_dim, 0)
         self.mlp = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(time_emb_dim, out_dim * 2),
+            nn.Linear(mlp_dim, out_dim * 2),
         )
         self.block1 = LinearBlock(in_dim, out_dim, dropout_p)
         self.block2 = LinearBlock(out_dim, out_dim, dropout_p)
@@ -113,22 +175,28 @@ class LinearResnetBlock(nn.Module):
         )
 
     def forward(
-        self, x: Tensor["B", "in_dim"], time_emb: Tensor["B", "time_emb_dim"]
+        self,
+        x: Tensor["B", "in_dim"],
+        time_emb: Optional[Tensor["B", "time_emb_dim"]] = None,
+        cond_emb: Optional[Tensor["B", "cond_emb_dim"]] = None,
     ) -> Tensor["B", "out_dim"]:
         scale_shift = None
-        if exists(self.mlp) and exists(time_emb):
-            time_emb = self.mlp(time_emb)
-            scale_shift = time_emb.chunk(2, dim=-1)
+        if exists(self.mlp) and (exists(time_emb) or exists(cond_emb)):
+            emb = tuple(filter(exists, (time_emb, cond_emb)))
+            emb = self.mlp(t.cat(emb, -1))
+            scale_shift = emb.chunk(2, dim=-1)
         h = self.block1(x, scale_shift=scale_shift)
         h = self.block2(h)
         return h + self.res_proj(x)
 
 
-class LinearNetwork(nn.Module):
+class LinearNetwork(BFNetwork):
     def __init__(
         self,
         dim: int = 2,
         hidden_dims: list[int] = [128, 128],
+        cond_dim: Optional[int] = None,
+        cond_drop_prob: float = 0.5,
         sin_dim: int = 16,
         time_dim: int = 16,
         random_time_emb: bool = False,
@@ -139,12 +207,17 @@ class LinearNetwork(nn.Module):
         Args:
             dim: data dimension
             hidden_dims: Hidden features to use in the network
+            cond_dim: dimension of conditioning information
+            cond_drop_prob: probability of dropping conditioning info out
+                during classifier-free guidance
             sin_dim: simusoidal time embedding dims
             time_dim: time embedding dimension
             random_time_emb: use random (True) or learned (False) time embedding
             dropout_p: dropout used in network
         """
         super().__init__()
+
+        # Time embeddings
         self.time_mlp = nn.Sequential(
             RandomOrLearnedSinusoidalPosEmb(sin_dim, random_time_emb),
             nn.Linear(sin_dim + 1, time_dim),
@@ -152,19 +225,67 @@ class LinearNetwork(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
+        # Class embeddings
+        self.cond_dim = cond_dim
+        if exists(cond_dim):
+            self.cond_drop_prob = cond_drop_prob
+            self.cond_emb = nn.Embedding(cond_dim, dim)
+            self.null_classes_emb = nn.Parameter(t.randn(dim))
+
+            cond_embed_dim = dim * 4
+            self.cond_mlp = nn.Sequential(
+                nn.Linear(dim, cond_embed_dim),
+                nn.GELU(),
+                nn.Linear(cond_embed_dim, cond_embed_dim),
+            )
+        else:
+            cond_embed_dim = None
+            self.cond_emb = None
+            self.cond_drop_prob = 1.0
+
         hs = [dim] + hidden_dims
         self.blocks = nn.ModuleList([])
         for j, k in zip(hs[:-1], hs[1:]):
-            self.blocks.append(LinearResnetBlock(j, k, time_dim, dropout_p))
+            self.blocks.append(
+                LinearResnetBlock(j, k, time_dim, cond_embed_dim, dropout_p)
+            )
         self.final_proj = nn.Linear(hs[-1], dim)
 
     def forward(
-        self, x: Tensor["B", "D"], time: Tensor["B"]
+        self,
+        x: Tensor["B", "D"],
+        time: Tensor["B"],
+        cond: Optional[Tensor["B"]] = None,
+        cond_drop_prob: Optional[float] = None,
     ) -> Tensor["B", "D"]:
+        batch, device, dtype = x.shape[0], x.device, x.dtype
         time = self.time_mlp(time[:, None])
+
+        if exists(self.cond_emb):
+            if not exists(cond):
+                # TODO: issue warning here that a conditional model is being
+                # called without conditioning information?
+                cond = t.randn((batch, self.cond_dim)).to(device, dtype)
+                cond_drop_prob = 1.0
+
+            cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
+            cond_emb = self.cond_emb(cond)
+
+            if cond_drop_prob > 0.0:
+                keep_mask = t.rand((batch,), device=device) < (
+                    1 - cond_drop_prob
+                )
+                null_classes_emb = self.null_classes_emb.expand(batch, -1)
+                cond_emb = t.where(
+                    keep_mask[:, None], cond_emb, null_classes_emb
+                )
+            c = self.cond_mlp(cond_emb)
+        else:
+            c = None
+
         x_res = x.clone()
         for block in self.blocks:
-            x = block(x, time)
+            x = block(x, time, c)
         x = self.final_proj(x)
         return x + x_res
 
@@ -244,10 +365,10 @@ class ResnetBlock(nn.Module):
 
     def forward(
         self,
-        x: Tensor["B", "D"],
+        x: Tensor["B", "in_dim"],
         time_emb: Optional[Tensor["B", "time_emb_dim"]] = None,
         class_emb: Optional[Tensor["B", "class_emb_dim"]] = None,
-    ) -> Tensor["B", "D"]:
+    ) -> Tensor["B", "out_dim"]:
         scale_shift = None
         if exists(self.mlp) and (exists(time_emb) or exists(class_emb)):
             emb = tuple(filter(exists, (time_emb, class_emb)))
@@ -406,7 +527,7 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
-class Unet(nn.Module):
+class Unet(BFNetwork):
     def __init__(
         self,
         dim: int,
@@ -459,9 +580,10 @@ class Unet(nn.Module):
         )
 
         # Class embeddings
+        self.cond_dim = num_classes
         if exists(num_classes):
             self.cond_drop_prob = cond_drop_prob
-            self.class_emb = nn.Embedding(num_classes, dim)
+            self.class_emb = nn.Embedding(self.cond_dim, dim)
             self.null_classes_emb = nn.Parameter(t.randn(dim))
 
             classes_dim = dim * 4
@@ -568,39 +690,28 @@ class Unet(nn.Module):
     def downsample_factor(self) -> int:
         return 2 ** (len(self.downs) - 1)
 
-    def forward_with_cond_scale(
-        self, *args, cond_scale=1.0, rescaled_phi=0.0, **kwargs
-    ) -> Tensor["B", "D"]:
-        logits = self.forward(*args, cond_drop_prob=0.0, **kwargs)
-        if cond_scale == 1.0:
-            return logits
-
-        null_logits = self.forward(*args, cond_drop_prob=1.0, **kwargs)
-        scaled_logits = null_logits + (logits - null_logits) * cond_scale
-
-        if rescaled_phi == 0.0:
-            return scaled_logits
-
-        std_fn = partial(
-            t.std, dim=tuple(range(1, scaled_logits.ndim)), keepdim=True
-        )
-        rescaled_logits = scaled_logits * (
-            std_fn(logits) / std_fn(scaled_logits)
-        )
-        return rescaled_logits * rescaled_phi + scaled_logits * (
-            1.0 - rescaled_phi
-        )
-
     def forward(
         self,
         x: Tensor["B", "D"],
         time: Tensor["B"],
-        classes: Optional[Tensor["B"]] = None,
+        classes: Optional[Tensor["B", 1]] = None,
         cond_drop_prob: Optional[float] = None,
     ) -> Tensor["B", "D"]:
         batch, device = x.shape[0], x.device
 
-        if self.class_emb is not None:
+        if exists(classes) and classes.ndim > 1:
+            if classes.ndim == 2 and classes.size(-1) == 1:
+                classes = classes.squeeze(-1)
+            else:
+                raise ValueError(f"Invalid class shape: {classes.shape}")
+
+        if exists(self.class_emb):
+            if not exists(classes):
+                # TODO: issue warning when conditional model is called without
+                # classes?
+                classes = t.randint(0, self.cond_dim, (batch,), device=device)
+                cond_drop_prob = 1.0
+
             cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
             classes_emb = self.class_emb(classes)
 

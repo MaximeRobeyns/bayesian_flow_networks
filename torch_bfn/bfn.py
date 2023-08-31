@@ -16,17 +16,18 @@
 import torch as t
 import torch.nn as nn
 
-from typing import Tuple
+from typing import Tuple, Optional, Union
 from torchtyping import TensorType as Tensor
 
-from torch_bfn.utils import str_to_torch_dtype
+from torch_bfn.utils import str_to_torch_dtype, exists, default
+from torch_bfn.networks import BFNetwork
 
 
 class ContinuousBFN(nn.Module):
     def __init__(
         self,
-        dim: Tuple[int],
-        net: nn.Module,
+        dim: Union[Tuple[int], int],
+        net: BFNetwork,
         *,
         device_str: str = "cpu",
         dtype_str: str = "float32",
@@ -45,7 +46,7 @@ class ContinuousBFN(nn.Module):
         super().__init__()
         self.device = t.device(device_str)
         self.dtype = str_to_torch_dtype(dtype_str)
-        self.dim = dim
+        self.dim = dim if isinstance(dim, Tuple) else (dim,)
 
         dtype_eps = t.finfo(self.dtype).eps
         self.eps = eps if eps < dtype_eps else dtype_eps
@@ -54,12 +55,19 @@ class ContinuousBFN(nn.Module):
         self.net.train()
 
         # Assert that the network has the right dimensions
+        bs = 16
         test_batch = t.randn(
-            (16, *self.dim), device=self.device, dtype=self.dtype
+            (bs, *self.dim), device=self.device, dtype=self.dtype
         )
-        test_time = t.rand((16,), device=self.device, dtype=self.dtype)
-        out = self.net(test_batch, test_time)
-        assert out.shape == (16, *self.dim)
+        test_time = t.rand((bs,), device=self.device, dtype=self.dtype)
+        if exists(getattr(net, "num_classes", None)) and isinstance(
+            net.num_classes, int
+        ):
+            classes = t.randint(0, net.num_classes, (bs, 1), device=self.device)
+        else:
+            classes = None
+        out = self.net(test_batch, test_time, classes)
+        assert out.shape == (bs, *self.dim)
 
     def _pad_to_dim(self, a: Tensor["B"]):
         return a.view(a.shape[0], *((1,) * len(self.dim)))
@@ -69,6 +77,9 @@ class ContinuousBFN(nn.Module):
         mu: Tensor["B", "D"],
         time: Tensor["B", 1],
         gamma: Tensor["B", 1],
+        cond: Optional[Tensor["B", "C"]] = None,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
         t_min=1e-10,
         x_min=-1.0,
         x_max=1.0,
@@ -76,16 +87,34 @@ class ContinuousBFN(nn.Module):
         assert (time >= 0).all() and (time <= 1).all()
         assert mu.dim() == time.dim()
         zeros = t.zeros_like(mu)
-        eps = self.net(mu, time.view(-1))
+        if cond is not None:
+            if exists(cond_scale) or exists(rescaled_phi):
+                eps = self.net.forward_with_cond_scale(
+                    mu,
+                    time.view(-1),
+                    cond,
+                    cond_scale=default(cond_scale, 1.0),
+                    rescaled_phi=default(rescaled_phi, 0.0),
+                )
+            else:
+                eps = self.net(mu, time.view(-1), cond)
+        else:
+            eps = self.net(mu, time.view(-1))
         x = (mu / gamma) - t.sqrt((1.0 - gamma) / gamma) * eps
         x = t.clip(x, x_min, x_max)
         return t.where(time < t_min, zeros, x)
 
-    def loss(self, x: Tensor["B", "D"], sigma_1: float = 0.002) -> Tensor["B"]:
+    def loss(
+        self,
+        x: Tensor["B", "D"],
+        cond: Optional[Tensor["B", "C"]] = None,
+        sigma_1: float = 0.002,
+    ) -> Tensor["B"]:
         """Continuous-time loss function; L∞(t)
 
         Args:
             x: training data
+            cond: optional class / conditioning information
             sigma_1: standard deviation at t=1.
 
         Returns:
@@ -97,17 +126,22 @@ class ContinuousBFN(nn.Module):
         gamma = 1.0 - s1.pow(2.0 * time)
         dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma) + self.eps)
         mu = dist.sample((1,)).squeeze(0)
-        x_pred = self.cts_output_prediction(mu, time, gamma)
+        x_pred = self.cts_output_prediction(mu, time, gamma, cond)
         loss = -(s1.log() * (x - x_pred).pow(2.0) / s1.pow(2 * time)).mean(-1)
         return loss
 
     def discrete_loss(
-        self, x: Tensor["B", "D"], sigma_1: float = 0.002, n: int = 30
+        self,
+        x: Tensor["B", "D"],
+        cond: Tensor["B", "C"],
+        sigma_1: float = 0.002,
+        n: int = 30,
     ) -> Tensor["B"]:
         """Discrete (n-step) loss function for continuous data.
 
         Args:
             x: training data
+            cond: conditioning / class information
             sigma_1: standard deviatoin at t=1
             n: number of training steps
 
@@ -126,7 +160,7 @@ class ContinuousBFN(nn.Module):
         mu[mask] = dist.sample((1,)).squeeze(0)
         x_pred = t.zeros_like(mu)
         cts_output = self.cts_output_prediction(
-            mu[mask], time[mask], gamma[mask]
+            mu[mask], time[mask], gamma[mask], cond[mask]
         )
         x_pred[mask] = cts_output
         loss = (n * (1.0 - s1.pow(2.0 / n))) / (2.0 * s1.pow(2.0 * i / n))
@@ -135,22 +169,45 @@ class ContinuousBFN(nn.Module):
 
     @t.inference_mode()
     def sample(
-        self, n_samples: int = 10, sigma_1: float = 0.001, n_timesteps: int = 20
-    ) -> Tensor["n_samples", "dim"]:
+        self,
+        n_samples: int = 10,
+        sigma_1: float = 0.001,
+        n_timesteps: int = 20,
+        cond: Optional[Tensor["Y", "cond_dim"]] = None,
+        cond_scale: Optional[float] = None,  # 1.
+        rescaled_phi: Optional[float] = None,  # 0.0,
+    ) -> Union[Tensor["n_samples", "dim"], Tensor["n_samples", "Y", "dim"]]:
+        if exists(cond):
+            if cond.ndim == 1:
+                cond = cond[:, None]
+            n_cond = cond.size(0)
+            cond = cond.repeat_interleave(n_samples, 0)
+            batch = cond.size(0)
+        else:
+            batch = n_samples
+
         self.net.eval()
         tkwargs = {"device": self.device, "dtype": self.dtype}
         s1 = t.tensor((sigma_1,), **tkwargs)
-        mu = t.zeros((n_samples, *self.dim), **tkwargs)
+        mu = t.zeros((batch, *self.dim), **tkwargs)
         rho = 1.0
         for i in range(1, n_timesteps + 1):
             time = t.tensor(((i - 1) / n_timesteps,), **tkwargs)
             time = self._pad_to_dim(time)
             gamma = 1 - s1.pow(2 * time)
-            x = self.cts_output_prediction(mu, time, gamma)
+            x = self.cts_output_prediction(
+                mu, time, gamma, cond, cond_scale, rescaled_phi
+            )
             alpha = s1.pow(-2 * i / n_timesteps) * (1 - s1.pow(2 / n_timesteps))
             y_dist = t.distributions.Normal(x, 1 / alpha + self.eps)
             y = y_dist.sample((1,)).squeeze(0)
             mu = (rho * mu + alpha * y) / (rho + alpha)
             rho = rho + alpha
         t1 = self._pad_to_dim(t.tensor((1,), **tkwargs))
-        return self.cts_output_prediction(mu, t1, 1 - s1.pow(2.0))
+        outputs = self.cts_output_prediction(
+            mu, t1, 1 - s1.pow(2.0), cond, cond_scale, rescaled_phi
+        )
+        self.net.train()
+        if cond is not None:
+            outputs = outputs.view(n_cond, n_samples, *outputs.shape[1:])
+        return outputs
