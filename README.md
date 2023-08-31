@@ -14,6 +14,8 @@ pip install -e .
 
 ## Examples
 
+> Note: work in progress. More examples to come.
+
 ### Continuous Data (swiss roll)
 
 Both the infinite and discrete time loss functions are implemented.
@@ -67,7 +69,7 @@ samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
 In `examples/MNIST_continuous_bfn.py`, we show an example training a UNet on
 MNIST with classifier-free guidance.
 
-![MNIST samples with classifier-free guidance](./mnist_cont_classifier_free_guidance.png)
+![MNIST samples with classifier-free guidance](./examples/mnist_cont_classifier_free_guidance.png)
 
 ```python
 
@@ -108,5 +110,3 @@ for epoch in range(epochs):
         opt.step()
         ema.update(model)
 ```
-
-> Note: work in progress. More examples to come.
