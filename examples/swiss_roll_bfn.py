@@ -23,7 +23,7 @@ from sklearn.datasets import make_swiss_roll
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from torch_bfn import ContinuousBFN, LinearNetwork
-from torch_bfn.utils import EMA, get_fst_device, norm_denorm, str_to_torch_dtype
+from torch_bfn.utils import EMA, norm_denorm, str_to_torch_dtype
 
 
 def make_roll_dset(

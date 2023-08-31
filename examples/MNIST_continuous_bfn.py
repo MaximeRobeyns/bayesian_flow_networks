@@ -19,7 +19,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from torchvision import datasets, transforms
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 from torch_bfn import Unet, ContinuousBFN
 from torch_bfn.utils import str_to_torch_dtype, EMA
@@ -79,9 +79,10 @@ def train(
     for epoch in range(epochs):
         loss = None
         for batch in train_loader:
-            X = batch[0].to(device, dtype)
-            loss = model.loss(X, sigma_1=0.01).mean()
-            # loss = model.discrete_loss(X, sigma_1=0.01, n=30).mean()
+            X, y = batch
+            X, y = X.to(device, dtype), y.to(device)
+            loss = model.loss(X, y, sigma_1=0.01).mean()
+            # loss = model.discrete_loss(X, y, sigma_1=0.01, n=30).mean()
             opt.zero_grad()
             loss.backward()
             t.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -91,8 +92,15 @@ def train(
         if epoch % 1 == 0:
             assert loss is not None
             print(loss.item())
-            samples = model.sample(5, sigma_1=1e-5, n_timesteps=20)
-            plot_samples(samples, f"outputs/samples_{epoch}.png")
+            sample_classes = t.arange(10, device=device)
+            samples = model.sample(
+                1,
+                sigma_1=1e-5,
+                n_timesteps=20,
+                cond=sample_classes,
+                cond_scale=10.0,
+            ).squeeze(1)
+            plot_samples(samples, f"outputs/mnist_samples_{epoch:03d}.png")
 
 
 if __name__ == "__main__":
@@ -105,6 +113,9 @@ if __name__ == "__main__":
         dim=128,
         channels=1,
         dim_mults=[1, 2, 2],
+        num_classes=10,
+        cond_drop_prob=0.5,
+        flash_attn=True,
     )
 
     model = ContinuousBFN(
@@ -114,9 +125,20 @@ if __name__ == "__main__":
         dtype_str=dtype,
     )
 
+    sample_classes = t.arange(10, device=t.device(device))
+    samples = model.sample(
+        1, sigma_1=1e-5, n_timesteps=20, cond=sample_classes, cond_scale=10.0
+    ).squeeze(1)
+    plot_samples(samples, "outputs/initial_mnist_samples.png")
+
     train(
         model,
         train_loader,
         device_str=device,
         dtype_str=dtype,
     )
+
+    samples = model.sample(
+        1, sigma_1=1e-5, n_timesteps=20, cond=sample_classes, cond_scale=10.0
+    ).squeeze(1)
+    plot_samples(samples, "outputs/final_mnist_samples.png")
