@@ -2,7 +2,7 @@
 
 A PyTorch implementation of [Bayesian Flow Networks (Graves et al., 2023)](https://arxiv.org/abs/2308.07037).
 
-See associated blog post [here](https://maximerobeyns.com/bayesian_flow_networks).
+See my explanatory blog post [here](https://maximerobeyns.com/bayesian_flow_networks).
 
 ## Installation
 
@@ -36,7 +36,7 @@ net = LinearNetwork(dim=2, hidden_dims=[512, 512], sin_dim=16, time_dim=64)
 # Setup the BFN
 model = ContinuousBFN(dim=2, net=net)
 
-# Train the model
+# Setup training
 opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
 ema = EMA(0.9)
 ema.register(model)
@@ -44,6 +44,7 @@ ema.register(model)
 # Load data (see examples/swiss_roll_bfn)
 train_loader = ...
 
+# Train the model
 for epoch in range(100):
     for batch in train_loader:
         X = batch[0].to(device, dtype)

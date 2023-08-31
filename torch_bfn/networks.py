@@ -1,4 +1,4 @@
-# Copyright (C) 2023 Maxime Robeyns <dev@maximerobeyns.com>
+# Copyright (C) 2023 Maxime  <dev@maximerobeyns.com>
 # Copyright (C) 2020 Phil Wang <github.com/lucidrains>
 # Copyright (C) 2020 Jonathan Ho <github.com/hojonathanho>
 #
@@ -29,13 +29,13 @@ import torch.nn.functional as F
 from torch import einsum
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from typing import Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union
 from functools import partial
 from packaging import version
 from collections import namedtuple
 from torchtyping import TensorType as Tensor
 
-from torch_bfn.utils import default, cast_tuple, print_once
+from torch_bfn.utils import default, exists, cast_tuple, print_once
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -66,7 +66,6 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
         )
 
     def forward(self, x: Tensor["B", 1]) -> Tensor["B", "dim+1"]:
-        # x = x[..., None]
         freqs = x * self.weights[None, :] * 2 * math.pi
         fouriered = t.cat((freqs.sin(), freqs.cos()), -1)
         fouriered = t.cat((x, fouriered), -1)
@@ -86,7 +85,7 @@ class LinearBlock(nn.Module):
     ) -> Tensor["B", "out_dim"]:
         x = self.proj(x)
         x = self.norm(x)
-        if scale_shift is not None:
+        if exists(scale_shift):
             scale, shift = scale_shift
             x = x * (scale + 1) + shift
         x = self.act(x)
@@ -117,7 +116,7 @@ class LinearResnetBlock(nn.Module):
         self, x: Tensor["B", "in_dim"], time_emb: Tensor["B", "time_emb_dim"]
     ) -> Tensor["B", "out_dim"]:
         scale_shift = None
-        if self.mlp is not None and time_emb is not None:
+        if exists(self.mlp) and exists(time_emb):
             time_emb = self.mlp(time_emb)
             scale_shift = time_emb.chunk(2, dim=-1)
         h = self.block1(x, scale_shift=scale_shift)
@@ -163,12 +162,20 @@ class LinearNetwork(nn.Module):
         self, x: Tensor["B", "D"], time: Tensor["B"]
     ) -> Tensor["B", "D"]:
         time = self.time_mlp(time[:, None])
-        # time = self.time_mlp(time)
         x_res = x.clone()
         for block in self.blocks:
             x = block(x, time)
         x = self.final_proj(x)
         return x + x_res
+
+
+class Residual(nn.Module):
+    def __init__(self, fn: Callable[[Tensor["D":...], Any], Tensor["D":...]]):
+        super().__init__()
+        self.fn = fn
+
+    def forward(self, x: Tensor["D":...], *args, **kwargs) -> Tensor["D":...]:
+        return self.fn(x, *args, **kwargs) + x
 
 
 def upsample(dim: int, out_dim: Optional[int] = None) -> nn.Module:
@@ -202,7 +209,7 @@ class Block(nn.Module):
         x = self.proj(x)
         x = self.norm(x)
 
-        if scale_shift is not None:
+        if exists(scale_shift):
             scale, shift = scale_shift
             x = x * (scale + 1) + shift
 
@@ -217,12 +224,14 @@ class ResnetBlock(nn.Module):
         out_dim: int,
         *,
         time_emb_dim: Optional[int] = None,
+        class_emb_dim: Optional[int] = None,
         groups: int = 8,
     ):
         super().__init__()
+        mlp_dim = default(time_emb_dim, 0) + default(class_emb_dim, 0)
         self.mlp = (
-            nn.Sequential(nn.SiLU(), nn.Linear(time_emb_dim, out_dim * 2))
-            if time_emb_dim is not None
+            nn.Sequential(nn.SiLU(), nn.Linear(mlp_dim, out_dim * 2))
+            if exists(time_emb_dim) or exists(class_emb_dim)
             else None
         )
         self.block1 = Block(in_dim, out_dim, groups=groups)
@@ -233,11 +242,17 @@ class ResnetBlock(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x: t.Tensor, time_emb: Optional[t.Tensor]) -> t.Tensor:
+    def forward(
+        self,
+        x: Tensor["B", "D"],
+        time_emb: Optional[Tensor["B", "time_emb_dim"]] = None,
+        class_emb: Optional[Tensor["B", "class_emb_dim"]] = None,
+    ) -> Tensor["B", "D"]:
         scale_shift = None
-        if self.mlp is not None and time_emb is not None:
-            time_emb = self.mlp(time_emb)[..., None, None]
-            scale_shift = time_emb.chunk(2, dim=1)
+        if exists(self.mlp) and (exists(time_emb) or exists(class_emb)):
+            emb = tuple(filter(exists, (time_emb, class_emb)))
+            emb = self.mlp(t.cat(emb, -1))[..., None, None]
+            scale_shift = emb.chunk(2, dim=1)
 
         h = self.block1(x, scale_shift=scale_shift)
         h = self.block2(h)
@@ -399,6 +414,8 @@ class Unet(nn.Module):
         channels: int = 3,
         init_dim: Optional[int] = None,
         out_dim: Optional[int] = None,
+        num_classes: Optional[int] = None,
+        cond_drop_prob: float = 0.5,
         resnet_block_groups: int = 8,
         learned_sinusoidal_cond: bool = False,
         learned_sinusoidal_dim: int = 16,
@@ -418,8 +435,6 @@ class Unet(nn.Module):
 
         dims = [self.init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
-
-        block_class = partial(ResnetBlock, groups=resnet_block_groups)
 
         # time embeddings
         time_dim = dim * 4
@@ -443,6 +458,24 @@ class Unet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
+        # Class embeddings
+        if exists(num_classes):
+            self.cond_drop_prob = cond_drop_prob
+            self.class_emb = nn.Embedding(num_classes, dim)
+            self.null_classes_emb = nn.Parameter(t.randn(dim))
+
+            classes_dim = dim * 4
+
+            self.classes_mlp = nn.Sequential(
+                nn.Linear(dim, classes_dim),
+                nn.GELU(),
+                nn.Linear(classes_dim, classes_dim),
+            )
+        else:
+            classes_dim = None
+            self.class_emb = None
+            self.cond_drop_prob = 1.0
+
         # Attention
         num_stages = len(dim_mults)
         full_attn = cast_tuple(full_attn, num_stages)
@@ -458,6 +491,13 @@ class Unet(nn.Module):
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
 
+        block_class = partial(
+            ResnetBlock,
+            groups=resnet_block_groups,
+            time_emb_dim=time_dim,
+            class_emb_dim=classes_dim,
+        )
+
         for i, (
             (in_dim, out_dim),
             full_attn_i,
@@ -471,10 +511,12 @@ class Unet(nn.Module):
             self.downs.append(
                 nn.ModuleList(
                     [
-                        block_class(in_dim, in_dim, time_emb_dim=time_dim),
-                        block_class(in_dim, in_dim, time_emb_dim=time_dim),
+                        block_class(in_dim, in_dim),
+                        block_class(in_dim, in_dim),
                         attn_class(
-                            in_dim, dim_head=attn_dim_head_i, heads=attn_heads_i
+                            in_dim,
+                            dim_head=attn_dim_head_i,
+                            heads=attn_heads_i,
                         ),
                         downsample(in_dim, out_dim)
                         if not is_last
@@ -484,11 +526,11 @@ class Unet(nn.Module):
             )
 
         mid_dim = dims[-1]
-        self.mid_block1 = block_class(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block1 = block_class(mid_dim, mid_dim)
         self.mid_attn = FullAttention(
             mid_dim, heads=attn_heads[-1], dim_head=attn_dim_head[-1]
         )
-        self.mid_block2 = block_class(mid_dim, mid_dim, time_emb_dim=time_dim)
+        self.mid_block2 = block_class(mid_dim, mid_dim)
 
         for i, (
             (in_dim, out_dim),
@@ -505,12 +547,8 @@ class Unet(nn.Module):
             self.ups.append(
                 nn.ModuleList(
                     [
-                        block_class(
-                            out_dim + in_dim, out_dim, time_emb_dim=time_dim
-                        ),
-                        block_class(
-                            out_dim + in_dim, out_dim, time_emb_dim=time_dim
-                        ),
+                        block_class(out_dim + in_dim, out_dim),
+                        block_class(out_dim + in_dim, out_dim),
                         attn_class(
                             out_dim,
                             dim_head=attn_dim_head_i,
@@ -523,14 +561,64 @@ class Unet(nn.Module):
                 )
             )
 
-        self.final_res_block = block_class(dim * 2, dim, time_emb_dim=time_dim)
+        self.final_res_block = block_class(dim * 2, dim)
         self.final_conv = nn.Conv2d(dim, self.out_dim, 1)
 
     @property
     def downsample_factor(self) -> int:
         return 2 ** (len(self.downs) - 1)
 
-    def forward(self, x: t.Tensor, time: t.Tensor) -> t.Tensor:
+    def forward_with_cond_scale(
+        self, *args, cond_scale=1.0, rescaled_phi=0.0, **kwargs
+    ) -> Tensor["B", "D"]:
+        logits = self.forward(*args, cond_drop_prob=0.0, **kwargs)
+        if cond_scale == 1.0:
+            return logits
+
+        null_logits = self.forward(*args, cond_drop_prob=1.0, **kwargs)
+        scaled_logits = null_logits + (logits - null_logits) * cond_scale
+
+        if rescaled_phi == 0.0:
+            return scaled_logits
+
+        std_fn = partial(
+            t.std, dim=tuple(range(1, scaled_logits.ndim)), keepdim=True
+        )
+        rescaled_logits = scaled_logits * (
+            std_fn(logits) / std_fn(scaled_logits)
+        )
+        return rescaled_logits * rescaled_phi + scaled_logits * (
+            1.0 - rescaled_phi
+        )
+
+    def forward(
+        self,
+        x: Tensor["B", "D"],
+        time: Tensor["B"],
+        classes: Optional[Tensor["B"]] = None,
+        cond_drop_prob: Optional[float] = None,
+    ) -> Tensor["B", "D"]:
+        batch, device = x.shape[0], x.device
+
+        if self.class_emb is not None:
+            cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
+            classes_emb = self.class_emb(classes)
+
+            if cond_drop_prob > 0:
+                keep_mask = t.rand((batch,), device=device) < (
+                    1 - cond_drop_prob
+                )
+                null_classes_emb = self.null_classes_emb.expand(batch, -1)
+                classes_emb = t.where(
+                    keep_mask[:, None], classes_emb, null_classes_emb
+                )
+
+            c = self.classes_mlp(classes_emb)
+        else:
+            c = None
+
+        # main unet
+
         assert all(
             [d % self.downsample_factor == 0 for d in x.shape[-2:]]
         ), f"input dim {x.shape[-2:]} must be divisible by {self.downsample_factor} for Unet"
@@ -538,34 +626,36 @@ class Unet(nn.Module):
         x = self.init_conv(x)
         r = x.clone()
 
+        if time.shape == (1,):
+            time = time.expand(batch)
         time = self.time_mlp(time)
 
         h = []
 
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x, time)
+            x = block1(x, time, c)
             h.append(x)
 
-            x = block2(x, time)
+            x = block2(x, time, c)
             x = attn(x) + x
             h.append(x)
 
             x = downsample(x)
 
-        x = self.mid_block1(x, time)
+        x = self.mid_block1(x, time, c)
         x = self.mid_attn(x) + x
-        x = self.mid_block2(x, time)
+        x = self.mid_block2(x, time, c)
 
         for block1, block2, attn, upsample in self.ups:
             x = t.cat((x, h.pop()), 1)
-            x = block1(x, time)
+            x = block1(x, time, c)
 
             x = t.cat((x, h.pop()), 1)
-            x = block2(x, time)
+            x = block2(x, time, c)
             x = attn(x) + x
 
             x = upsample(x)
 
         x = t.cat((x, r), dim=1)
-        x = self.final_res_block(x, time)
+        x = self.final_res_block(x, time, c)
         return self.final_conv(x)
