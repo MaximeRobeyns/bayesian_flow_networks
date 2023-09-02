@@ -60,10 +60,9 @@ class ContinuousBFN(nn.Module):
             (bs, *self.dim), device=self.device, dtype=self.dtype
         )
         test_time = t.rand((bs,), device=self.device, dtype=self.dtype)
-        if exists(getattr(net, "num_classes", None)) and isinstance(
-            net.num_classes, int
-        ):
-            classes = t.randint(0, net.num_classes, (bs, 1), device=self.device)
+        # We use the presence of cond_dim as a way to identify conditional models
+        if net.is_conditional_model:
+            classes = t.randint(0, net.cond_dim, (bs, 1), device=self.device)
         else:
             classes = None
         out = self.net(test_batch, test_time, classes)
@@ -194,6 +193,7 @@ class ContinuousBFN(nn.Module):
         for i in range(1, n_timesteps + 1):
             time = t.tensor(((i - 1) / n_timesteps,), **tkwargs)
             time = self._pad_to_dim(time)
+            # time = time.expand(cond.size(0))
             gamma = 1 - s1.pow(2 * time)
             x = self.cts_output_prediction(
                 mu, time, gamma, cond, cond_scale, rescaled_phi

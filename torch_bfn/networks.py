@@ -46,6 +46,11 @@ class BFNetwork(nn.Module):
     torch_bfn.
     """
 
+    def __init__(self, cond_dim: Optional[int] = None):
+        super().__init__()
+        self.cond_dim = cond_dim
+        self.is_conditional_model = exists(cond_dim)
+
     @abstractmethod
     def forward(
         self,
@@ -215,7 +220,7 @@ class LinearNetwork(BFNetwork):
             random_time_emb: use random (True) or learned (False) time embedding
             dropout_p: dropout used in network
         """
-        super().__init__()
+        super().__init__(cond_dim)
 
         # Time embeddings
         self.time_mlp = nn.Sequential(
@@ -226,13 +231,14 @@ class LinearNetwork(BFNetwork):
         )
 
         # Class embeddings
-        self.cond_dim = cond_dim
-        if exists(cond_dim):
+        if self.is_conditional_model:
+            self.cond_dim = cond_dim
             self.cond_drop_prob = cond_drop_prob
-            self.cond_emb = nn.Embedding(cond_dim, dim)
+            self.cond_emb = nn.Embedding(self.cond_dim, dim)
             self.null_classes_emb = nn.Parameter(t.randn(dim))
 
             cond_embed_dim = dim * 4
+
             self.cond_mlp = nn.Sequential(
                 nn.Linear(dim, cond_embed_dim),
                 nn.GELU(),
@@ -259,14 +265,26 @@ class LinearNetwork(BFNetwork):
         cond_drop_prob: Optional[float] = None,
     ) -> Tensor["B", "D"]:
         batch, device, dtype = x.shape[0], x.device, x.dtype
+
+        if time.shape == (1,):
+            time = time.expand(batch)
         time = self.time_mlp(time[:, None])
 
-        if exists(self.cond_emb):
+        # Handle conditioning information
+
+        if self.is_conditional_model:
             if not exists(cond):
-                # TODO: issue warning here that a conditional model is being
-                # called without conditioning information?
-                cond = t.randn((batch, self.cond_dim)).to(device, dtype)
+                cond = t.randint(0, self.cond_dim, (batch,), device=device)
                 cond_drop_prob = 1.0
+
+            # Recover from cond of shape [B, 1] instead of [B]
+            if cond.ndim > 1:
+                if cond.ndim == 2 and cond.size(-1) == 1:
+                    cond = cond.squeeze(-1)
+                else:
+                    raise ValueError(
+                        f"Class shape should be ({batch},), not {cond.shape}"
+                    )
 
             cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
             cond_emb = self.cond_emb(cond)
@@ -546,7 +564,7 @@ class Unet(BFNetwork):
         attn_dim_head: Union[Tuple[int, ...], int] = 32,
         flash_attn: bool = False,
     ):
-        super().__init__()
+        super().__init__(num_classes)
 
         # Set up dimensions
         self.channels = channels
@@ -580,8 +598,8 @@ class Unet(BFNetwork):
         )
 
         # Class embeddings
-        self.cond_dim = num_classes
-        if exists(num_classes):
+        if self.is_conditional_model:
+            self.cond_dim = num_classes
             self.cond_drop_prob = cond_drop_prob
             self.class_emb = nn.Embedding(self.cond_dim, dim)
             self.null_classes_emb = nn.Parameter(t.randn(dim))
@@ -699,23 +717,27 @@ class Unet(BFNetwork):
     ) -> Tensor["B", "D"]:
         batch, device = x.shape[0], x.device
 
-        if exists(classes) and classes.ndim > 1:
-            if classes.ndim == 2 and classes.size(-1) == 1:
-                classes = classes.squeeze(-1)
-            else:
-                raise ValueError(f"Invalid class shape: {classes.shape}")
+        # Handle conditoning information
 
-        if exists(self.class_emb):
+        if self.is_conditional_model:
+
             if not exists(classes):
-                # TODO: issue warning when conditional model is called without
-                # classes?
                 classes = t.randint(0, self.cond_dim, (batch,), device=device)
                 cond_drop_prob = 1.0
+
+            # Recover from class of shape [B, 1] instead of [B]
+            if classes.ndim > 1:
+                if classes.ndim == 2 and classes.size(-1) == 1:
+                    classes = classes.squeeze(-1)
+                else:
+                    raise ValueError(
+                        f"Class shape should be ({batch},), not {classes.shape}"
+                    )
 
             cond_drop_prob = default(cond_drop_prob, self.cond_drop_prob)
             classes_emb = self.class_emb(classes)
 
-            if cond_drop_prob > 0:
+            if cond_drop_prob > 0.0:
                 keep_mask = t.rand((batch,), device=device) < (
                     1 - cond_drop_prob
                 )
