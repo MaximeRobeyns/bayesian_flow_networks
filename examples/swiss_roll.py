@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Swiss roll example using a diffusion model"""
+"""Swiss roll example using a simple continuous BFN"""
 
+import os
 import torch as t
 import matplotlib.pyplot as plt
 
@@ -21,12 +22,12 @@ from torchtyping import TensorType as Tensor
 from sklearn.datasets import make_swiss_roll
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from torch_bfn import DDPM
+from torch_bfn import ContinuousBFN, LinearNetwork
 from torch_bfn.utils import EMA, norm_denorm, str_to_torch_dtype
 
 
 def make_roll_dset(
-    n: int, bs: int = 512, noise: float = 0.3, dtype: t.dtype = t.float64
+    n: int, bs: int = 128, noise: float = 0.3, dtype: t.dtype = t.float32
 ) -> Tuple[
     DataLoader, DataLoader, Callable[[Tensor["B", "D"]], Tensor["B", "D"]]
 ]:
@@ -44,22 +45,27 @@ def make_roll_dset(
     return train_loader, val_loader, denorm
 
 
-def plot_fwd_diffusion(data: Tensor["B", "D"], model: DDPM):
-    _, axs = plt.subplots(1, 10, figsize=(30, 3))
-    for i in range(10):
-        q_i = model.q_sample(data, t.tensor([i * 10], device=data.device)).cpu()
-        axs[i].scatter(q_i[:, 0], q_i[:, 1], s=10)
-        axs[i].set_axis_off()
-        axs[i].set_title("$q(\\mathbf{x}_{" + str(i * 10) + "})$")
-    plt.savefig("outputs/fwd.png")
+def plot_samples(
+    denormed_samples: Tensor["B", "D"], fpath: str = "outputs/samples.png"
+):
+    samples = denormed_samples.numpy()
+    plt.figure(figsize=(6, 4))
+    plt.scatter(samples[:, 0], samples[:, 1], edgecolor="k")
+    plt.title("BFN Samples")
+    plt.xlabel("Feature 1")
+    plt.ylabel("Feature 2")
+    # plt.show()
+    os.makedirs(os.path.dirname(fpath), exist_ok=True)
+    plt.savefig(fpath)
     plt.close()
 
 
 def train(
-    model: DDPM,
+    model: ContinuousBFN,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    epochs: int = 2001,
+    denorm: Callable[[Tensor["B", "D"]], Tensor["B", "D"]],
+    epochs: int = 100,
     device_str: str = "cuda:0",
     dtype_str: str = "float64",
 ):
@@ -75,33 +81,51 @@ def train(
         loss = None
         for batch in train_loader:
             X = batch[0].to(device, dtype)
-            loss = model.noise_estimation_loss(X)
+            loss = model.loss(X, sigma_1=0.01).mean()
+            # loss = model.discrete_loss(X, sigma_1=0.01, n=30).mean()
             opt.zero_grad()
             loss.backward()
             t.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             ema.update(model)
 
-        if epoch % 200 == 0:
+        if epoch % 20 == 0:
             assert loss is not None
             print(loss.item())
-            x_seq = model.p_sample_loop(val_loader.dataset[:][0].shape)
-            fig, axs = plt.subplots(1, 10, figsize=(30, 3))
-            for i in range(1, 11):
-                cur_x = x_seq[i * 10].detach()
-                axs[i - 1].scatter(cur_x[:, 0], cur_x[:, 1], s=10)
-                axs[i - 1].set_title("$q(\\mathbf{x}_{" + str(i * 100) + "})$")
-            plt.savefig(f"outputs/train_{epoch}.png")
-            plt.close()
+            samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
+            plot_samples(denorm(samples.cpu()), f"outputs/samples_{epoch}.png")
 
 
 if __name__ == "__main__":
 
     train_loader, val_loader, denorm = make_roll_dset(int(1e4))
+    device = "cuda:0"
+    dtype = "float32"
 
-    model = DDPM()
+    net = LinearNetwork(
+        dim=2,
+        hidden_dims=[512, 512],
+        sin_dim=16,
+        time_dim=64,
+        random_time_emb=False,
+        dropout_p=0.0,
+    )
 
-    # Plot forward model for sanity
-    plot_fwd_diffusion(train_loader.dataset[:][0].to(0), model)
+    model = ContinuousBFN(
+        dim=2,
+        net=net,
+        device_str=device,
+        dtype_str=dtype,
+    )
 
-    train(model, train_loader, val_loader)
+    samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
+    plot_samples(denorm(samples.cpu()))
+
+    train(
+        model,
+        train_loader,
+        val_loader,
+        denorm,
+        device_str=device,
+        dtype_str=dtype,
+    )
