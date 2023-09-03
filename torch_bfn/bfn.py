@@ -123,7 +123,9 @@ class ContinuousBFN(nn.Module):
         time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
         time = self._pad_to_dim(time)
         gamma = 1.0 - s1.pow(2.0 * time)
-        dist = t.distributions.Normal(gamma * x, gamma * (1 - gamma) + self.eps)
+        dist = t.distributions.Normal(
+            gamma * x, (gamma * (1 - gamma) + self.eps).sqrt()
+        )
         mu = dist.sample((1,)).squeeze(0)
         x_pred = self.cts_output_prediction(mu, time, gamma, cond)
         loss = -(s1.log() * (x - x_pred).pow(2.0) / s1.pow(2 * time)).mean(-1)
@@ -155,7 +157,7 @@ class ContinuousBFN(nn.Module):
         mask = gamma.view(-1) != 0
         mu = t.zeros_like(x)
         gnz = gamma[mask]  # gamma non-zero
-        dist = t.distributions.Normal(gnz * x[mask], gnz * (1 - gnz))
+        dist = t.distributions.Normal(gnz * x[mask], (gnz * (1 - gnz)).sqrt())
         mu[mask] = dist.sample((1,)).squeeze(0)
         x_pred = t.zeros_like(mu)
         cts_output = self.cts_output_prediction(
@@ -199,7 +201,7 @@ class ContinuousBFN(nn.Module):
                 mu, time, gamma, cond, cond_scale, rescaled_phi
             )
             alpha = s1.pow(-2 * i / n_timesteps) * (1 - s1.pow(2 / n_timesteps))
-            y_dist = t.distributions.Normal(x, 1 / alpha + self.eps)
+            y_dist = t.distributions.Normal(x, (1 / alpha + self.eps).sqrt())
             y = y_dist.sample((1,)).squeeze(0)
             mu = (rho * mu + alpha * y) / (rho + alpha)
             rho = rho + alpha
