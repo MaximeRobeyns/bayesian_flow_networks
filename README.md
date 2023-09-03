@@ -14,15 +14,15 @@ pip install -e .
 
 ## Examples
 
-> Note: work in progress. More examples to come.
+> Note: work in progress. More examples to come, including discrete data.
 
 ### Continuous Data (swiss roll)
 
 Both the infinite and discrete time loss functions are implemented.
 
 Here is a minimal example for the 2D swiss roll dataset (see
-`examples/swiss_roll_bfn.py` for the full code). Here are some model samples
-throughout training:
+`examples/swiss_roll_bfn.py` for the full code). The following diagram shows
+some model samples throughout training:
 
 ![Swiss roll samples throughout training](./examples/swiss_roll.png)
 
@@ -66,10 +66,11 @@ samples = model.sample(1000, sigma_1=0.01, n_timesteps=10)
 
 ### Conditional Generation with Classifier-Free Guidance (Two Moons)
 
-We can generate data conditioned on labels by using classifier free guidance.
+Generating data conditioned on labels using classifier-free guidance is also
+implemented.
 
 To use this, simply pass the conditioning information (either class labels, or
-a continuous vector) to the loss function during training
+a continuous vector) to the loss function during training:
 
 ```python
 # continuous-time version
@@ -78,16 +79,16 @@ loss = model.loss(X, y, sigma_1=0.01).mean()
 loss = model.discrete_loss(X, y, sigma_1=0.01, n=30).mean()
 ```
 
-Using a training loop that looks very similar to the one above for the swiss
+With a training loop that looks very similar to the one above for the swiss
 roll dataset (see `examples/two_moons_classifier_free_guidance.py` for the full
-code), we obtain the following samples throughout training (conditioning class
-labels drawn uniformly at random).
+code), we obtain the following samples throughout training (with the
+conditioning class labels drawn uniformly at random).
 
 ![Two-moons samples with classifier-free guidance](./examples/two_moons.png)
 
 The `sample` method of the `ContinuousBFN` class accepts a `cond` argument
-allowing you to provide either class labels or continuous vectors, as well as a
-`cond_scale` and `rescaled_phi` argument to influence how strong the
+which allows you to provide either class labels or continuous vectors, as well
+as a `cond_scale` and `rescaled_phi` argument to influence how strong the
 conditioning signal is. Note that we still have the `n_samples` argument,
 allowing us to draw multiple samples conditioned on the same input. If you omit
 the `cond` argument for a conditional model, unconditional samples will be
@@ -103,12 +104,12 @@ class_1_moon, class_2_moon = samples
 
 ### Classifier-Free Guidance with Continuous Data (MNIST)
 
-In `examples/MNIST_continuous_bfn.py`, we show an example training a UNet on
-MNIST with classifier-free guidance.
-
-> Note: this was only trained for a few epochs
+For an example of training a UNet on MNIST with classifier-free guidance, see
+`examples/MNIST_continuous_bfn.py`.
 
 ![MNIST samples with classifier-free guidance](./examples/mnist_cont_classifier_free_guidance.png)
+
+Here is the main gist of what's going on:
 
 ```python
 
@@ -117,7 +118,7 @@ train_loader = get_mnist()
 
 # Create the UNet for MNIST
 net = Unet(
-    dim=128,
+    dim=256,
     channels=1,
     dim_mults=[1, 2, 2],
     num_classes=10,
@@ -148,4 +149,8 @@ for epoch in range(epochs):
         t.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         ema.update(model)
+
+# Draw some samples from the model
+sample_classes = t.arange(10)
+samples = model.sample(1, cond=sample_classes, cond_scale=7.)
 ```

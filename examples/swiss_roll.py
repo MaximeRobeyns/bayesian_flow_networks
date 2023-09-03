@@ -67,7 +67,7 @@ def train(
     denorm: Callable[[Tensor["B", "D"]], Tensor["B", "D"]],
     epochs: int = 100,
     device_str: str = "cuda:0",
-    dtype_str: str = "float64",
+    dtype_str: str = "float32",
 ):
     device = t.device(device_str)
     dtype = str_to_torch_dtype(dtype_str)
