@@ -15,12 +15,14 @@
 
 import torch as t
 import torch.nn as nn
+import torch.nn.functional as F
 
-from typing import Tuple, Optional, Union
+from typing import List, Tuple, Optional, Union
 from torchtyping import TensorType as Tensor
+from torch.distributions import Categorical, Normal
 
 from torch_bfn.utils import str_to_torch_dtype, exists, default
-from torch_bfn.networks import BFNetwork
+from torch_bfn.networks import BFNetwork, DiscreteBFNetwork
 
 
 class ContinuousBFN(nn.Module):
@@ -33,7 +35,8 @@ class ContinuousBFN(nn.Module):
         dtype_str: str = "float32",
         eps: float = 1e-9,
     ):
-        """Continuous-time Bayesian Flow Network
+        """
+        Bayesian flow network for continuous data.
 
         Args:
             dim: The dimensions of the data e.g. (8,) for 8-dimensional
@@ -68,7 +71,7 @@ class ContinuousBFN(nn.Module):
         out = self.net(test_batch, test_time, classes)
         assert out.shape == (bs, *self.dim)
 
-    def _pad_to_dim(self, a: Tensor["B"]):
+    def _pad_to_dim(self, a: Tensor["B"]) -> Tensor["B", "1*dim"]:
         return a.view(a.shape[0], *((1,) * len(self.dim)))
 
     def cts_output_prediction(
@@ -108,13 +111,17 @@ class ContinuousBFN(nn.Module):
         x: Tensor["B", "D"],
         cond: Optional[Tensor["B", "C"]] = None,
         sigma_1: float = 0.002,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
     ) -> Tensor["B"]:
         """Continuous-time loss function; L∞(t)
 
         Args:
             x: training data
-            cond: optional class / conditioning information
-            sigma_1: standard deviation at t=1.
+            cond: an optional class / conditioning vector
+            sigma_1: standard deviation at t=1
+            cond_scale: scale to apply to the conditional signal
+            rescaled_phi: another lever to influence the conditioning signal
 
         Returns:
             Tensor["B"]: batch loss
@@ -123,12 +130,13 @@ class ContinuousBFN(nn.Module):
         time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
         time = self._pad_to_dim(time)
         gamma = 1.0 - s1.pow(2.0 * time)
-        dist = t.distributions.Normal(
-            gamma * x, (gamma * (1 - gamma) + self.eps).sqrt()
-        )
+        dist = Normal(gamma * x, (gamma * (1 - gamma) + self.eps).sqrt())
         mu = dist.sample((1,)).squeeze(0)
-        x_pred = self.cts_output_prediction(mu, time, gamma, cond)
-        loss = -(s1.log() * (x - x_pred).pow(2.0) / s1.pow(2 * time)).mean(-1)
+        x_pred = self.cts_output_prediction(
+            mu, time, gamma, cond, cond_scale, rescaled_phi
+        )
+        diff = (x - x_pred).flatten(1).pow(2.0).sum(-1).sqrt()
+        loss = -(s1.log() * diff / s1.pow(2 * time.view(-1)))
         return loss
 
     def discrete_loss(
@@ -137,6 +145,8 @@ class ContinuousBFN(nn.Module):
         cond: Tensor["B", "C"],
         sigma_1: float = 0.002,
         n: int = 30,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
     ) -> Tensor["B"]:
         """Discrete (n-step) loss function for continuous data.
 
@@ -145,6 +155,8 @@ class ContinuousBFN(nn.Module):
             cond: conditioning / class information
             sigma_1: standard deviatoin at t=1
             n: number of training steps
+            cond_scale: scale to apply to the conditional signal
+            rescaled_phi: another lever to influence the conditioning signal
 
         Returns:
             Tensor["B"]: batch loss
@@ -157,15 +169,21 @@ class ContinuousBFN(nn.Module):
         mask = gamma.view(-1) != 0
         mu = t.zeros_like(x)
         gnz = gamma[mask]  # gamma non-zero
-        dist = t.distributions.Normal(gnz * x[mask], (gnz * (1 - gnz)).sqrt())
+        dist = Normal(gnz * x[mask], (gnz * (1 - gnz)).sqrt())
         mu[mask] = dist.sample((1,)).squeeze(0)
         x_pred = t.zeros_like(mu)
         cts_output = self.cts_output_prediction(
-            mu[mask], time[mask], gamma[mask], cond[mask]
+            mu[mask],
+            time[mask],
+            gamma[mask],
+            cond[mask],
+            cond_scale,
+            rescaled_phi,
         )
         x_pred[mask] = cts_output
         loss = (n * (1.0 - s1.pow(2.0 / n))) / (2.0 * s1.pow(2.0 * i / n))
-        loss = loss * (x - x_pred).pow(2.0)
+        diff = (x - x_pred).flatten(1).pow(2.0).sum(-1).sqrt()
+        loss = loss * diff
         return loss
 
     @t.inference_mode()
@@ -195,13 +213,12 @@ class ContinuousBFN(nn.Module):
         for i in range(1, n_timesteps + 1):
             time = t.tensor(((i - 1) / n_timesteps,), **tkwargs)
             time = self._pad_to_dim(time)
-            # time = time.expand(cond.size(0))
             gamma = 1 - s1.pow(2 * time)
             x = self.cts_output_prediction(
                 mu, time, gamma, cond, cond_scale, rescaled_phi
             )
             alpha = s1.pow(-2 * i / n_timesteps) * (1 - s1.pow(2 / n_timesteps))
-            y_dist = t.distributions.Normal(x, (1 / alpha + self.eps).sqrt())
+            y_dist = Normal(x, (1 / alpha + self.eps).sqrt())
             y = y_dist.sample((1,)).squeeze(0)
             mu = (rho * mu + alpha * y) / (rho + alpha)
             rho = rho + alpha
@@ -213,3 +230,183 @@ class ContinuousBFN(nn.Module):
         if cond is not None:
             outputs = outputs.view(n_cond, n_samples, *outputs.shape[1:])
         return outputs
+
+
+class DiscreteBFN(nn.Module):
+    """
+    A discrete Bayesian flow network, where every dimension of your problem
+    must have the same number of class labels, K.
+
+    This is unsuitable, for instance, for Bayesian optimisation over
+    categorical variables, where each categorical variable may have different
+    K.
+
+    This however comes to the benefit of simplicity and performance for
+    problems where each dimension does have the same number of class labels,
+    such as language modelling, discrete images (where each pixel has the same
+    dimemension) and so forth.
+    """
+
+    def __init__(
+        self,
+        dim: Union[Tuple[int], int],
+        K: int,
+        net: DiscreteBFNetwork,
+        *,
+        beta_1: float = 3.0,
+        device_str: str = "cpu",
+        dtype_str: str = "float32",
+        eps: float = 1e-9,
+    ):
+        """
+        Bayesian flow network for discrete data.
+        """
+        super().__init__()
+        self.device = t.device(device_str)
+        self.dtype = str_to_torch_dtype(dtype_str)
+        self.dim = dim if isinstance(dim, Tuple) else (dim,)
+        self.K = K
+        assert beta_1 > 0.0, "beta_1 must be positive"
+        self.beta_1 = beta_1
+
+        dtype_eps = t.finfo(self.dtype).eps
+        self.eps = eps if eps < dtype_eps else dtype_eps
+
+        self.net = net.to(self.device, self.dtype)
+        self.net.train()
+
+        # Assert that the network has the right dimensions
+        bs = 16
+        test_batch = t.randn(
+            (bs, *self.dim, K), device=self.device, dtype=self.dtype
+        )
+        test_time = t.rand((bs,), device=self.device, dtype=self.dtype)
+        # We use the presence of cond_dim as a way to identify conditional models
+        if net.is_conditional_model:
+            classes = t.randint(0, net.cond_dim, (bs, 1), device=self.device)
+        else:
+            classes = None
+        out = self.net(test_batch, test_time, classes)
+        assert out.shape == (bs, *self.dim)
+
+    def _pad_to_dim(self, a: Tensor["B"]) -> Tensor["B", "1*dim"]:
+        return a.view(a.shape[0], *((1,) * len(self.dim)))
+
+    def _make_onehot(self, x: Tensor["B", "D", int]) -> Tensor["B", "D", "K"]:
+        """Utility to create the e_{x} tensor. Note that we transpose the final
+        two dimensions compared to the form used by the paper, in order to keep
+        K as the final dimension."""
+        B, D = x.size()
+        onehot = t.zeros(B, D, self.K, dtype=x.dtype, device=x.device)
+        onehot.scatter_(2, x.unsqueeze(-1), 1)
+        return onehot
+
+    def discrete_output_probs(
+        self,
+        theta: Tensor["B", "D", "K", bool],
+        time: Tensor["B"],
+        cond: Optional[Tensor["B", "C"]] = None,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
+    ) -> Tensor["B", "D", "K"]:
+        """Returns the probs (not distribution) of the output distribution."""
+        assert (time >= 0).all() and (time <= 1).all()
+        # assert theta
+        if cond is not None:
+            if exists(cond_scale) or exists(rescaled_phi):
+                psi = self.net.forward_with_cond_scale(
+                    theta,
+                    time.view(-1),
+                    cond,
+                    cond_scale=default(cond_scale, 1.0),
+                    rescaled_phi=default(rescaled_phi, 0.0),
+                )
+            else:
+                psi = self.net(theta, time.view(-1), cond)
+        else:
+            psi = self.net(theta, time.view(-1))
+        assert psi.shape == theta.shape
+        if psi.size(-1) == 1:
+            # Handle Bernoulli parameters separately
+            p1 = t.sigmoid(psi)
+            probs = t.cat((p1, 1 - p1), -1)
+        else:
+            probs = t.softmax(psi, -1)
+        return probs
+
+    def loss(
+        self,
+        x: Tensor["B", "D", int],
+        beta_1: Optional[float] = None,
+        cond: Optional[Tensor["B", "C"]] = None,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
+    ) -> Tensor["B"]:
+        """Continuous-time loss for discrete data"""
+        beta_1 = default(beta_1, self.beta_1)
+        assert beta_1 > 0.0
+        assert (x >= 0).all() and (
+            x < self.K
+        ).all(), f"x must contain class labels between 0 and {self.K}"
+
+        time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
+        time = self._pad_to_dim(time)
+        # time = time.reshape(-1, *((1,) * x.dim()))  # [B, D*1, 1]
+        beta = beta_1 * time.pow(2.0)
+        e_x = self._make_onehot(x)
+        y_dist = Normal(beta * (self.K * e_x - 1), (beta * self.K).sqrt())
+        y_samples = y_dist.sample((1,)).squeeze(0)
+        theta = t.softmax(y_samples, -1)
+        out_probs = self.discrete_output_probs(
+            theta, time, cond, cond_scale, rescaled_phi
+        )
+        diff = (e_x - out_probs).flatten(1).pow(2.0).sum(-1).sqrt()
+        loss = K * beta_1 * time.view(-1) * diff
+        return loss
+
+    # TODO: implement discrete-time variant of loss
+
+    @t.inference_mode()
+    def sample(
+        self,
+        n_samples: int = 10,
+        beta_1: float = 3.0,
+        n_timesteps: int = 20,
+        cond: Optional[Tensor["Y", "C"]] = None,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
+    ) -> Union[Tensor["n_samples", "dim"], Tensor["n_samples", "Y", "dim"]]:
+
+        if exists(cond):
+            if cond.ndim == 1:
+                cond = cond[:, None]
+            n_cond = cond.size(0)
+            cond = cond.repeat_interleave(n_samples, 0)
+
+        tkwargs = {"device": self.device, "dtype": self.dtype}
+        self.net.eval()
+        theta = t.full((n_samples, *self.dim, self.K), 1 / self.K, **tkwargs)
+        for i in range(1, n_timesteps + 1):
+            time = t.tensor(((i - 1) / n_timesteps,), **tkwargs)
+            time = self._pad_to_dim(time)
+            out_probs = self.discrete_output_probs(
+                theta, time, cond, cond_scale, rescaled_phi
+            )
+            out_dist = Categorical(probs=out_probs)
+            k_samples = out_dist.sample((1,)).squeeze(0)
+            alpha = beta_1 * ((2 * i - 1) / n_timesteps**2)
+            e_k = self._make_onehot(k_samples)
+            y_dist = Normal(
+                beta_1 * (self.K * e_k - 1), t.tensor((alpha * self.K,)).sqrt()
+            )
+            y = y_dist.sample((1,)).squeeze(0)
+            theta_prime = y.exp() * theta
+            theta = theta_prime / theta_prime.sum(-1, keepdim=True)
+        out_probs = self.discrete_output_probs(
+            theta, t.tensor((1,), **tkwargs), cond, cond_scale, rescaled_phi
+        )
+        samples = Categorical(out_probs).sample((1,)).squeeze(0)
+        self.net.train()
+        if exists(cond):
+            samples = samples.view(n_cond, n_samples, *samples.shape[1:])
+        return samples

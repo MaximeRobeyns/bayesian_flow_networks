@@ -110,6 +110,16 @@ def norm_denorm(
     return data, denorm
 
 
+def eye_like(x: Tensor["B", "D", "D"]) -> Tensor["B", "D", "D"]:
+    assert (
+        x.shape[-1] == x.shape[-2]
+    ), f"x is not square in the last 2 dims: {x.shape}"
+
+    return t.eye(x.shape[-1], dtype=x.dtype, device=x.device).expand(
+        x.shape[:-2] + (-1, -1)
+    )
+
+
 def exists(x: Optional[Any]) -> bool:
     return x is not None
 

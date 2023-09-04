@@ -56,7 +56,7 @@ class BFNetwork(nn.Module):
         self,
         x: Tensor["B", "D"],
         time: Tensor["B"],
-        cond: Optional[Tensor["B"]] = None,
+        cond: Optional[Tensor["B", "C"]] = None,
         cond_drop_prob: Optional[float] = None,
     ) -> Tensor["B", "D"]:
         """Returns a value of the same shape as x (e.g. predicts the noise
@@ -101,6 +101,24 @@ class BFNetwork(nn.Module):
         return rescaled_logits * rescaled_phi + scaled_logits * (
             1.0 - rescaled_phi
         )
+
+
+class DiscreteBFNetwork(BFNetwork):
+    """
+    For discrete variants of BFNs, we require networks to use the last tensor
+    dimemsion as the class label dimension, as is conventional in transformer
+    models for language.
+    """
+
+    @abstractmethod
+    def forward(
+        self,
+        x: Tensor["B", "D", "K"],
+        time: Tensor["B"],
+        cond: Optional[Tensor["B", "C"]],
+        cond_drop_prob: Optional[float] = None,
+    ) -> Tensor["B", "D", "K"]:
+        raise NotImplementedError
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -306,6 +324,58 @@ class LinearNetwork(BFNetwork):
             x = block(x, time, c)
         x = self.final_proj(x)
         return x + x_res
+
+
+class DiscreteLinearNet(LinearNetwork):
+    def __init__(
+        self,
+        dim: int = 2,
+        K: int = 1,
+        hidden_dims: list[int] = [128, 128],
+        cond_dim: Optional[int] = None,
+        cond_drop_prob: float = 0.5,
+        sin_dim: int = 16,
+        time_dim: int = 16,
+        random_time_emb: bool = False,
+        dropout_p: float = 0.0,
+    ):
+        """Simple network for D-dimensional, discrete data.
+
+        Args:
+            dim: data dimension
+            K: number of classes per dimension
+            hidden_dims: Hidden features to use in the network
+            cond_dim: dimension of conditioning information
+            cond_drop_prob: probability of dropping conditioning info out
+                during classifier-free guidance
+            sin_dim: simusoidal time embedding dims
+            time_dim: time embedding dimension
+            random_time_emb: use random (True) or learned (False) time embedding
+            dropout_p: dropout used in network
+        """
+        super().__init__(
+            dim * K,
+            hidden_dims,
+            cond_dim,
+            cond_drop_prob,
+            sin_dim,
+            time_dim,
+            random_time_emb,
+            dropout_p,
+        )
+
+    def forward(
+        self,
+        x: Tensor["B", "D", "K"],
+        time: Tensor["B"],
+        cond: Optional[Tensor["B", "C"]] = None,
+        cond_drop_prob: Optional[float] = None,
+    ) -> Tensor["B", "D", "K"]:
+        return (
+            super()
+            .forward(x.flatten(1), time, cond, cond_drop_prob)
+            .view(x.shape)
+        )
 
 
 class Residual(nn.Module):
