@@ -17,7 +17,7 @@ import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import List, Tuple, Optional, Union
+from typing import Tuple, Optional, Union
 from torchtyping import TensorType as Tensor
 from torch.distributions import Categorical, Normal
 
@@ -287,7 +287,7 @@ class DiscreteBFN(nn.Module):
         else:
             classes = None
         out = self.net(test_batch, test_time, classes)
-        assert out.shape == (bs, *self.dim)
+        assert out.shape == (bs, *self.dim, self.K)
 
     def _pad_to_dim(self, a: Tensor["B"]) -> Tensor["B", "1*dim"]:
         return a.view(a.shape[0], *((1,) * len(self.dim)))
@@ -298,8 +298,7 @@ class DiscreteBFN(nn.Module):
         K as the final dimension."""
         B, D = x.size()
         onehot = t.zeros(B, D, self.K, dtype=x.dtype, device=x.device)
-        onehot.scatter_(2, x.unsqueeze(-1), 1)
-        return onehot
+        return onehot.scatter(2, x.unsqueeze(-1), 1)
 
     def discrete_output_probs(
         self,
@@ -350,8 +349,8 @@ class DiscreteBFN(nn.Module):
         ).all(), f"x must contain class labels between 0 and {self.K}"
 
         time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
-        time = self._pad_to_dim(time)
-        # time = time.reshape(-1, *((1,) * x.dim()))  # [B, D*1, 1]
+        # time = self._pad_to_dim(time)
+        time = time.reshape(-1, *((1,) * x.dim()))  # [B, D*1, 1]
         beta = beta_1 * time.pow(2.0)
         e_x = self._make_onehot(x)
         y_dist = Normal(beta * (self.K * e_x - 1), (beta * self.K).sqrt())
@@ -361,7 +360,7 @@ class DiscreteBFN(nn.Module):
             theta, time, cond, cond_scale, rescaled_phi
         )
         diff = (e_x - out_probs).flatten(1).pow(2.0).sum(-1).sqrt()
-        loss = K * beta_1 * time.view(-1) * diff
+        loss = self.K * beta_1 * time.view(-1) * diff
         return loss
 
     # TODO: implement discrete-time variant of loss
@@ -397,7 +396,8 @@ class DiscreteBFN(nn.Module):
             alpha = beta_1 * ((2 * i - 1) / n_timesteps**2)
             e_k = self._make_onehot(k_samples)
             y_dist = Normal(
-                beta_1 * (self.K * e_k - 1), t.tensor((alpha * self.K,)).sqrt()
+                beta_1 * (self.K * e_k - 1),
+                t.tensor((alpha * self.K,), **tkwargs).sqrt(),
             )
             y = y_dist.sample((1,)).squeeze(0)
             theta_prime = y.exp() * theta
