@@ -1,11 +1,11 @@
-<div align="center">
-<h1>Bayesian Flow Networks</h1>
-<video width="3000" height="1250" loop autoplay muted src="./examples/bfd.mp4" type="video/mp4">
+<div align="center"><h1>Bayesian Flow Networks</h1>
 </div>
 
-A PyTorch implementation of [Bayesian Flow Networks (Graves et al., 2023)](https://arxiv.org/abs/2308.07037).
+A PyTorch implementation of [Bayesian Flow Networks (Graves et al., 2023)](https://arxiv.org/abs/2308.07037). 
 
 See my explanatory blog post [here](https://maximerobeyns.com/bayesian_flow_networks).
+
+![cont_bfd](https://github.com/MaximeRobeyns/bayesian_flow_networks/assets/17814194/4f4209c1-5c99-43cb-ae4e-cbbc3ef2f4b7)
 
 ## Getting Started
 
@@ -22,6 +22,7 @@ You can now import the library as `torch_bfn`.
 There are generally two considerations to get started:
 
 1. **Selecting a Network**
+   
    We provide some networks to get started in the `torch_bfn.networks` module.
    These map tensors to outputs of the same shape and must additionally accept a
    time value. These networks also support classifier-free guidance. To use a
@@ -29,11 +30,11 @@ There are generally two considerations to get started:
    abstract methods.
 
 2. **Initialising a BFN**
+   
    You can now initialise either a `ContinuousBFN` or `DiscreteBFN` depending on
    your problem.
 
-See the example snippets below for more on using these classes, and refer to the
-full files in the [examples](./examples) directory.
+See the example snippets below and the full files in the [examples](./examples) directory for more on using these classes. For a more conceptual description of the BFN framework, see my accompanying [blog post](https://maximerobeyns.com/bayesian_flow_networks)
 
 ## Examples
 
