@@ -1,6 +1,6 @@
 <div align="center">
 <h1>Bayesian Flow Networks</h1>
-<video width="3000" height="1250" loop autoplay muted src="https://maximerobeyns.com/articleassets/diag/a/bayesian_flow_networks/bfd.mp4" type="video/mp4">
+<video width="3000" height="1250" loop autoplay muted src="./examples/bfd.mp4" type="video/mp4">
 </div>
 
 A PyTorch implementation of [Bayesian Flow Networks (Graves et al., 2023)](https://arxiv.org/abs/2308.07037).
