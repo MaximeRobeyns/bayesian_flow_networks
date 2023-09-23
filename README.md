@@ -1,16 +1,39 @@
-# Bayesian Flow Networks
+<div align="center">
+<h1>Bayesian Flow Networks</h1>
+<video width="3000" height="1250" loop autoplay muted src="https://maximerobeyns.com/articleassets/diag/a/bayesian_flow_networks/bfd.mp4" type="video/mp4">
+</div>
 
 A PyTorch implementation of [Bayesian Flow Networks (Graves et al., 2023)](https://arxiv.org/abs/2308.07037).
 
 See my explanatory blog post [here](https://maximerobeyns.com/bayesian_flow_networks).
 
-## Installation
+## Getting Started
+
+Install the package locally from source:
 
 ```bash
 git clone https://github.com/MaximeRobeyns/bayesian_flow_networks
 cd bayesian_flow_networks
 pip install -e .
 ```
+
+You can now import the library as `torch_bfn`.
+
+There are generally two considerations to get started:
+
+1. **Selecting a Network**
+   We provide some networks to get started in the `torch_bfn.networks` module.
+   These map tensors to outputs of the same shape and must additionally accept a
+   time value. These networks also support classifier-free guidance. To use a
+   new architecture, simply extend the `BFNetwork` class and implement the
+   abstract methods.
+
+2. **Initialising a BFN**
+   You can now initialise either a `ContinuousBFN` or `DiscreteBFN` depending on
+   your problem.
+
+See the example snippets below for more on using these classes, and refer to the
+full files in the [examples](./examples) directory.
 
 ## Examples
 

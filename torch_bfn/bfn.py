@@ -132,8 +132,6 @@ class ContinuousBFN(nn.Module):
         gamma = 1.0 - s1.pow(2.0 * time)
         std = (gamma * (1 - gamma) + self.eps).sqrt()
         mu = gamma * x + std * t.randn_like(x)
-        # dist = Normal(gamma * x, (gamma * (1 - gamma) + self.eps).sqrt())
-        # mu = dist.sample((1,)).squeeze(0)
         x_pred = self.cts_output_prediction(
             mu, time, gamma, cond, cond_scale, rescaled_phi
         )
@@ -173,8 +171,6 @@ class ContinuousBFN(nn.Module):
         gnz = gamma[mask]  # gamma non-zero
         std = (gnz * (1 - gnz)).sqrt()
         mu[mask] = gnz * x[mask] + std * t.randn_like(x[mask])
-        # dist = Normal(gnz * x[mask], (gnz * (1 - gnz)).sqrt())
-        # mu[mask] = dist.sample((1,)).squeeze(0)
         x_pred = t.zeros_like(mu)
         cts_output = self.cts_output_prediction(
             mu[mask],
