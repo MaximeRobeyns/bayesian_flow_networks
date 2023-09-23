@@ -130,8 +130,10 @@ class ContinuousBFN(nn.Module):
         time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
         time = self._pad_to_dim(time)
         gamma = 1.0 - s1.pow(2.0 * time)
-        dist = Normal(gamma * x, (gamma * (1 - gamma) + self.eps).sqrt())
-        mu = dist.sample((1,)).squeeze(0)
+        std = (gamma * (1 - gamma) + self.eps).sqrt()
+        mu = gamma * x + std * t.randn_like(x)
+        # dist = Normal(gamma * x, (gamma * (1 - gamma) + self.eps).sqrt())
+        # mu = dist.sample((1,)).squeeze(0)
         x_pred = self.cts_output_prediction(
             mu, time, gamma, cond, cond_scale, rescaled_phi
         )
@@ -142,7 +144,7 @@ class ContinuousBFN(nn.Module):
     def discrete_loss(
         self,
         x: Tensor["B", "D"],
-        cond: Tensor["B", "C"],
+        cond: Optional[Tensor["B", "C"]] = None,
         sigma_1: float = 0.002,
         n: int = 30,
         cond_scale: Optional[float] = None,
@@ -169,8 +171,10 @@ class ContinuousBFN(nn.Module):
         mask = gamma.view(-1) != 0
         mu = t.zeros_like(x)
         gnz = gamma[mask]  # gamma non-zero
-        dist = Normal(gnz * x[mask], (gnz * (1 - gnz)).sqrt())
-        mu[mask] = dist.sample((1,)).squeeze(0)
+        std = (gnz * (1 - gnz)).sqrt()
+        mu[mask] = gnz * x[mask] + std * t.randn_like(x[mask])
+        # dist = Normal(gnz * x[mask], (gnz * (1 - gnz)).sqrt())
+        # mu[mask] = dist.sample((1,)).squeeze(0)
         x_pred = t.zeros_like(mu)
         cts_output = self.cts_output_prediction(
             mu[mask],
@@ -218,8 +222,8 @@ class ContinuousBFN(nn.Module):
                 mu, time, gamma, cond, cond_scale, rescaled_phi
             )
             alpha = s1.pow(-2 * i / n_timesteps) * (1 - s1.pow(2 / n_timesteps))
-            y_dist = Normal(x, (1 / alpha + self.eps).sqrt())
-            y = y_dist.sample((1,)).squeeze(0)
+            std = (1 / alpha + self.eps).sqrt()
+            y = x + std * t.randn_like(x)
             mu = (rho * mu + alpha * y) / (rho + alpha)
             rho = rho + alpha
         t1 = self._pad_to_dim(t.tensor((1,), **tkwargs))
@@ -253,7 +257,7 @@ class DiscreteBFN(nn.Module):
         K: int,
         net: DiscreteBFNetwork,
         *,
-        beta_1: float = 3.0,
+        beta_1: float = 0.2,
         device_str: str = "cpu",
         dtype_str: str = "float32",
         eps: float = 1e-9,
@@ -292,14 +296,6 @@ class DiscreteBFN(nn.Module):
     def _pad_to_dim(self, a: Tensor["B"]) -> Tensor["B", "1*dim"]:
         return a.view(a.shape[0], *((1,) * len(self.dim)))
 
-    def _make_onehot(self, x: Tensor["B", "D", int]) -> Tensor["B", "D", "K"]:
-        """Utility to create the e_{x} tensor. Note that we transpose the final
-        two dimensions compared to the form used by the paper, in order to keep
-        K as the final dimension."""
-        B, D = x.size()
-        onehot = t.zeros(B, D, self.K, dtype=x.dtype, device=x.device)
-        return onehot.scatter(2, x.unsqueeze(-1), 1)
-
     def discrete_output_probs(
         self,
         theta: Tensor["B", "D", "K", bool],
@@ -331,6 +327,7 @@ class DiscreteBFN(nn.Module):
             probs = t.cat((p1, 1 - p1), -1)
         else:
             probs = t.softmax(psi, -1)
+        assert t.allclose(probs.sum(-1), t.ones_like(probs[..., 0]))
         return probs
 
     def loss(
@@ -349,41 +346,80 @@ class DiscreteBFN(nn.Module):
         ).all(), f"x must contain class labels between 0 and {self.K}"
 
         time = t.rand((x.size(0),), device=x.device, dtype=self.dtype)
-        # time = self._pad_to_dim(time)
-        time = time.reshape(-1, *((1,) * x.dim()))  # [B, D*1, 1]
         beta = beta_1 * time.pow(2.0)
-        e_x = self._make_onehot(x)
-        y_dist = Normal(beta * (self.K * e_x - 1), (beta * self.K).sqrt())
-        y_samples = y_dist.sample((1,)).squeeze(0)
+        e_x = F.one_hot(x, num_classes=self.K).float()
+        mean = beta.view(-1, 1, 1) * (self.K * e_x - 1)
+        std = (beta * self.K).view(-1, 1, 1).sqrt()
+        y_samples = mean + std * t.randn_like(mean)
         theta = t.softmax(y_samples, -1)
         out_probs = self.discrete_output_probs(
             theta, time, cond, cond_scale, rescaled_phi
         )
-        diff = (e_x - out_probs).flatten(1).pow(2.0).sum(-1).sqrt()
-        loss = self.K * beta_1 * time.view(-1) * diff
+        diff = (e_x - out_probs).pow(2.0)
+        loss = self.K * beta_1 * time[:, None, None] * diff
         return loss
 
-    # TODO: implement discrete-time variant of loss
+    def discrete_loss(
+        self,
+        x: Tensor["B", "D", int],
+        cond: Optional[Tensor["B", "C"]] = None,
+        beta_1: Optional[float] = None,
+        n: int = 30,
+        cond_scale: Optional[float] = None,
+        rescaled_phi: Optional[float] = None,
+    ) -> Tensor["B"]:
+        """Discrete-time loss for discrete data
+
+        WARNING: not getting good results with this one. Might have a bug.
+        Consider using the continuous-time `loss` instead.
+        """
+        beta_1 = default(beta_1, self.beta_1)
+        assert beta_1 > 0.0
+        assert (x >= 0).all() and (
+            x < self.K
+        ).all(), f"x must contain class labels between 0 and {self.K}"
+
+        i = t.randint(1, n + 1, (x.size(0),)).to(x.device)
+        time = (i - 1) / n
+        beta = beta_1 * time.pow(2.0)
+        e_x = F.one_hot(x, num_classes=self.K).float()
+        mean = beta.view(-1, 1, 1) * (self.K * e_x - 1)
+        std = (beta * self.K).view(-1, 1, 1).sqrt()
+        yp_samples = mean + std * t.randn_like(mean)
+        theta = t.softmax(yp_samples, -1)
+        out_probs = self.discrete_output_probs(
+            theta, time, cond, cond_scale, rescaled_phi
+        )
+        alpha = beta_1 * (2 * i - 1) / n**2
+        y_mean = alpha.view(-1, 1, 1) * (self.K * e_x - 1)
+        y_std = (alpha * self.K).view(-1, 1, 1).sqrt()
+        y_dist = Normal(y_mean, y_std)
+        y_samples = y_dist.sample((1,)).squeeze(0)
+        y_lp = y_dist.log_prob(y_samples)
+        l1 = y_lp.sum(-1).sum(-1)
+        l2 = (out_probs * y_lp.exp()).sum(-1).log().sum(-1)
+        loss = n * (l1 - l2)
+        return loss
 
     @t.inference_mode()
     def sample(
         self,
         n_samples: int = 10,
-        beta_1: float = 3.0,
+        beta_1: Optional[float] = None,
         n_timesteps: int = 20,
         cond: Optional[Tensor["Y", "C"]] = None,
         cond_scale: Optional[float] = None,
         rescaled_phi: Optional[float] = None,
     ) -> Union[Tensor["n_samples", "dim"], Tensor["n_samples", "Y", "dim"]]:
-
         if exists(cond):
             if cond.ndim == 1:
                 cond = cond[:, None]
             n_cond = cond.size(0)
             cond = cond.repeat_interleave(n_samples, 0)
 
-        tkwargs = {"device": self.device, "dtype": self.dtype}
         self.net.eval()
+        tkwargs = {"device": self.device, "dtype": self.dtype}
+        b1 = t.tensor((default(beta_1, self.beta_1),), **tkwargs)
         theta = t.full((n_samples, *self.dim, self.K), 1 / self.K, **tkwargs)
         for i in range(1, n_timesteps + 1):
             time = t.tensor(((i - 1) / n_timesteps,), **tkwargs)
@@ -393,15 +429,12 @@ class DiscreteBFN(nn.Module):
             )
             out_dist = Categorical(probs=out_probs)
             k_samples = out_dist.sample((1,)).squeeze(0)
-            alpha = beta_1 * ((2 * i - 1) / n_timesteps**2)
-            e_k = self._make_onehot(k_samples)
-            y_dist = Normal(
-                beta_1 * (self.K * e_k - 1),
-                t.tensor((alpha * self.K,), **tkwargs).sqrt(),
-            )
-            y = y_dist.sample((1,)).squeeze(0)
+            alpha = b1 * ((2 * i - 1) / n_timesteps**2)
+            e_k = F.one_hot(k_samples, num_classes=self.K).float()
+            std = (alpha * self.K).sqrt()
+            y = alpha * (self.K * e_k - 1) + std * t.randn_like(std)
             theta_prime = y.exp() * theta
-            theta = theta_prime / theta_prime.sum(-1, keepdim=True)
+            theta = t.softmax(theta_prime, -1)
         out_probs = self.discrete_output_probs(
             theta, t.tensor((1,), **tkwargs), cond, cond_scale, rescaled_phi
         )

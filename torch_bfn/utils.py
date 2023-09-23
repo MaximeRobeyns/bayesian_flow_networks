@@ -36,6 +36,12 @@ def copy_mod(mod: nn.Module) -> nn.Module:
     return new_mod
 
 
+def find_multiple(n: int, k: int) -> int:
+    if n % k == 0:
+        return n
+    return n + k - (n % k)
+
+
 def get_fst_device(model: nn.Module) -> t.device:
     """Returns the device of the first layer in the given module"""
     return next(model.parameters()).device

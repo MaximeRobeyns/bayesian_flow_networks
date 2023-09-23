@@ -23,8 +23,6 @@ from typing import Optional
 from functools import partial
 from torchtyping import TensorType as Tensor
 
-from torch_bfn.utils import exists
-
 __all__ = [
     "BFNetwork",
     "DiscreteBFNetwork",
@@ -39,10 +37,9 @@ class BFNetwork(nn.Module):
     torch_bfn.
     """
 
-    def __init__(self, cond_dim: Optional[int] = None):
+    def __init__(self, is_conditional_model: bool = False):
         super().__init__()
-        self.cond_dim = cond_dim
-        self.is_conditional_model = exists(cond_dim)
+        self.is_conditional_model = is_conditional_model
 
     @abstractmethod
     def forward(

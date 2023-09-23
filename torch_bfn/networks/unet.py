@@ -134,6 +134,8 @@ class ResnetBlock(nn.Module):
 
 
 class RMSNorm(nn.Module):
+    """RMSNorm, for image-shaped data"""
+
     def __init__(self, dim: int):
         super().__init__()
         self.g = nn.Parameter(t.ones(1, dim, 1, 1))
@@ -299,7 +301,7 @@ class Unet(BFNetwork):
         attn_dim_head: Union[Tuple[int, ...], int] = 32,
         flash_attn: bool = False,
     ):
-        super().__init__(num_classes)
+        super().__init__(exists(num_classes))
 
         # Set up dimensions
         self.channels = channels

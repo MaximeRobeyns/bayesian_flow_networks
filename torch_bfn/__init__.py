@@ -16,8 +16,7 @@ Kumar Srivastava, Timothy Atkinson and Faustino Gomez:
 https://arxiv.org/abs/2308.07037
 """
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 from torch_bfn.bfn import ContinuousBFN, DiscreteBFN
 from torch_bfn.networks import LinearNetwork, Unet
-from torch_bfn.diffusion import DDPM
