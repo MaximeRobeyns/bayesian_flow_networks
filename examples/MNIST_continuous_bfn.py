@@ -27,7 +27,7 @@ from torch_bfn.utils import str_to_torch_dtype, EMA
 
 def get_mnist() -> DataLoader:
     cuda_kwargs = {"num_workers": 1, "pin_memory": True, "shuffle": True}
-    train_kwargs = cuda_kwargs | {"batch_size": 512}
+    train_kwargs = cuda_kwargs | {"batch_size": 128}
 
     transform = transforms.Compose(
         [
@@ -81,7 +81,7 @@ def train(
         for batch in train_loader:
             X, y = batch
             X, y = X.to(device, dtype), y.to(device)
-            loss = model.loss(X, y, sigma_1=0.01).mean()
+            loss = model.loss(X, y, sigma_1=1e-3).mean()
             # loss = model.discrete_loss(X, y, sigma_1=0.01, n=30).mean()
             opt.zero_grad()
             loss.backward()
@@ -98,7 +98,7 @@ def train(
                 sigma_1=1e-5,
                 n_timesteps=20,
                 cond=sample_classes,
-                cond_scale=10.0,
+                cond_scale=7.0,
             ).squeeze(1)
             plot_samples(samples, f"outputs/mnist_samples_{epoch:03d}.png")
 
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     dtype = "float32"
 
     net = Unet(
-        dim=128,
+        dim=512,
         channels=1,
         dim_mults=[1, 2, 2],
         num_classes=10,
@@ -127,7 +127,7 @@ if __name__ == "__main__":
 
     sample_classes = t.arange(10, device=t.device(device))
     samples = model.sample(
-        1, sigma_1=1e-5, n_timesteps=20, cond=sample_classes, cond_scale=10.0
+        1, sigma_1=1e-5, n_timesteps=20, cond=sample_classes, cond_scale=7.0
     ).squeeze(1)
     plot_samples(samples, "outputs/initial_mnist_samples.png")
 
@@ -139,6 +139,6 @@ if __name__ == "__main__":
     )
 
     samples = model.sample(
-        1, sigma_1=1e-5, n_timesteps=20, cond=sample_classes, cond_scale=10.0
+        1, sigma_1=1e-5, n_timesteps=20, cond=sample_classes, cond_scale=7.0
     ).squeeze(1)
     plot_samples(samples, "outputs/final_mnist_samples.png")

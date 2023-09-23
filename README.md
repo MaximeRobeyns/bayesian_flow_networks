@@ -1,4 +1,4 @@
-# Bayesian Flow Networks in PyTorch
+# Bayesian Flow Networks
 
 A PyTorch implementation of [Bayesian Flow Networks (Graves et al., 2023)](https://arxiv.org/abs/2308.07037).
 
@@ -13,8 +13,6 @@ pip install -e .
 ```
 
 ## Examples
-
-> Note: work in progress. More examples to come, including discrete data.
 
 ### Continuous Data (swiss roll)
 
