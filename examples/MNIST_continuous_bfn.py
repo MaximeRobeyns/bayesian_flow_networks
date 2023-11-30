@@ -11,7 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Continuous (cast to float) MNIST example with BFN"""
+"""Continuous MNIST example with BFN
+
+Note: if you are used to working with diffusion models or VAEs, this script
+will take /far/ longer to train than you might expect (c.f. 200 epochs).
+"""
 
 import os
 import torch as t
@@ -54,6 +58,7 @@ def plot_samples(samples: t.Tensor, fpath: str = "outputs/mnist_samples.png"):
     for i in range(n):
         ax[i].imshow(dcn(samples[i]))
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
+    plt.tight_layout()
     plt.savefig(fpath)
     # plt.show()
     plt.close()
@@ -72,7 +77,7 @@ def train(
 
     model.to(device, dtype)
     opt = t.optim.AdamW(
-        model.parameters(), lr=1e-4, weight_decay=0.01, betas=(0.9, 0.98)
+        model.parameters(), lr=1e-3, weight_decay=0.01, betas=(0.9, 0.98)
     )
     ema.register(model)
 
@@ -110,7 +115,7 @@ if __name__ == "__main__":
     dtype = "float32"
 
     net = Unet(
-        dim=512,
+        dim=256,
         channels=1,
         dim_mults=[1, 2, 2],
         num_classes=10,
